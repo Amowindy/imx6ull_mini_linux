@@ -1,0 +1,154 @@
+// SPDX-License-Identifier: (GPL-2.0 OR MIT)
+//
+// i.MX6ULL Mini (NAND) 板级设备树
+//
+// 与 U-Boot 侧 mx6ull_14x14_evk_nand_defconfig 的移植方案保持一致:
+//   - DDR3L 256MB (imximage_256M.cfg)
+//   - 7 寸 RGB LCD (31MHz / 840x480 时序)
+//   - 单网口 ENET2 (PHY @1)，禁用 ENET1 (PHY @2)
+//   - GPMI NAND + 与 U-Boot mtdparts 一致的分区表
+//   - 禁用与 NAND 引脚复用的 QSPI / USDHC2
+// 生成的 dtb 名为 imx6ull-14x14-evk_nand.dtb，与 U-Boot 的
+// dtb_file / tftp_update 下载文件名一致。
+
+/dts-v1/;
+
+#include "imx6ull-14x14-evk.dts"
+
+/*
+ * 后备分区表里 nandrootfs 的大小：fixed-partitions 无法表达
+ * 「占满剩余空间」，只能按本板实机 512MiB NAND 写死。
+ * 正常启动由 mtdparts 的 cmdlinepart 解析器接管，不使用这个值；
+ * 换用其它容量 NAND 时必须同步修改这里。
+ */
+#define NAND_ROOTFS_SIZE 0x1c000000	/* 448MiB = 512MiB NAND - 64MiB 前置分区 */
+
+/ {
+	model = "i.MX6ULL Mini NAND Board";
+	compatible = "fsl,imx6ull-14x14-evk", "fsl,imx6ull";
+
+	memory@80000000 {
+		device_type = "memory";
+		reg = <0x80000000 0x10000000>;
+	};
+};
+
+/* U-Boot 中注释掉了 fec1 / ethphy0：本板只有 ENET2 一个网口 */
+&fec1 {
+	status = "disabled";
+	/delete-property/ phy-handle;
+};
+
+&ethphy0 {
+	status = "disabled";
+};
+
+/* 7 寸 RGB 屏时序，与 U-Boot 的 imx6ul-14x14-evk.dtsi 保持一致 */
+&timing0 {
+	clock-frequency = <31000000>;
+	hactive = <840>;
+	vactive = <480>;
+	hfront-porch = <40>;
+	hback-porch = <88>;
+	hsync-len = <48>;
+	vback-porch = <32>;
+	vfront-porch = <13>;
+	vsync-len = <3>;
+};
+
+/* LCD 复位脚：与 U-Boot setup_lcd() 的 GPIO5_IO09 一致，
+ * 引脚已在 pinctrl_lcdif_ctrl 中复用为 GPIO，mxsfb 驱动产生复位脉冲 */
+&lcdif {
+	enable-gpio = <&gpio5 9 GPIO_ACTIVE_HIGH>;
+};
+
+/* GPMI NAND：与 U-Boot 的 imx6ull-14x14-evk-nand.dts 相同 */
+&gpmi {
+	pinctrl-names = "default";
+	pinctrl-0 = <&pinctrl_gpmi_nand_1>;
+	status = "okay";
+	nand-on-flash-bbt;
+	fsl,use-minimum-ecc;
+
+	/*
+	 * 后备分区表：与 U-Boot 的 CONFIG_MTDPARTS_DEFAULT / bootargs 一致。
+	 * 内核 CONFIG_MTD_CMDLINE_PARTS=y 时 cmdlinepart 优先于 ofpart，
+	 * U-Boot 传入 mtdparts 后 rootfs 由 -(nandrootfs) 按 ONFI 探测到的
+	 * 实际容量动态取剩余空间，这张表不会生效。
+	 *
+	 * fixed-partitions 无法表达「占满剩余空间」，所以 NAND_ROOTFS_SIZE
+	 * 只能按本板实机 512MiB NAND 写死：0x20000000 - 0x04000000。
+	 * 这是整个设计里唯一残留的容量假设：换用其它容量 NAND 时，
+	 * 必须同步修改 NAND_ROOTFS_SIZE（或改用带正确 mtdparts 的启动参数）。
+	 * 另外 UBI 会扣除坏块与自身元数据开销，实际可用卷空间小于该值。
+	 */
+	partitions {
+		compatible = "fixed-partitions";
+		#address-cells = <1>;
+		#size-cells = <1>;
+
+		partition@0 {
+			label = "nandboot";
+			reg = <0x00000000 0x00800000>;
+			read-only;	/* SPL / U-Boot / FCB，误擦会变砖 */
+		};
+
+		partition@800000 {
+			label = "env";
+			reg = <0x00800000 0x00400000>;
+			read-only;	/* 仅由 U-Boot 的 saveenv 写入 */
+		};
+
+		partition@c00000 {
+			label = "nandkernel";
+			reg = <0x00c00000 0x02000000>;
+		};
+
+		partition@2c00000 {
+			label = "nanddtb";
+			reg = <0x02c00000 0x01000000>;
+		};
+
+		partition@3c00000 {
+			label = "nandtee";
+			reg = <0x03c00000 0x00400000>;
+		};
+
+		partition@4000000 {
+			label = "nandrootfs";
+			reg = <0x04000000 NAND_ROOTFS_SIZE>;
+		};
+	};
+};
+
+&iomuxc {
+	pinctrl_gpmi_nand_1: gpmi-nand-1 {
+		fsl,pins = <
+			MX6UL_PAD_NAND_CLE__RAWNAND_CLE         0xb0b1
+			MX6UL_PAD_NAND_ALE__RAWNAND_ALE         0xb0b1
+			MX6UL_PAD_NAND_WP_B__RAWNAND_WP_B       0xb0b1
+			MX6UL_PAD_NAND_READY_B__RAWNAND_READY_B 0xb000
+			MX6UL_PAD_NAND_CE0_B__RAWNAND_CE0_B     0xb0b1
+			MX6UL_PAD_NAND_CE1_B__RAWNAND_CE1_B     0xb0b1
+			MX6UL_PAD_NAND_RE_B__RAWNAND_RE_B       0xb0b1
+			MX6UL_PAD_NAND_WE_B__RAWNAND_WE_B       0xb0b1
+			MX6UL_PAD_NAND_DATA00__RAWNAND_DATA00   0xb0b1
+			MX6UL_PAD_NAND_DATA01__RAWNAND_DATA01   0xb0b1
+			MX6UL_PAD_NAND_DATA02__RAWNAND_DATA02   0xb0b1
+			MX6UL_PAD_NAND_DATA03__RAWNAND_DATA03   0xb0b1
+			MX6UL_PAD_NAND_DATA04__RAWNAND_DATA04   0xb0b1
+			MX6UL_PAD_NAND_DATA05__RAWNAND_DATA05   0xb0b1
+			MX6UL_PAD_NAND_DATA06__RAWNAND_DATA06   0xb0b1
+			MX6UL_PAD_NAND_DATA07__RAWNAND_DATA07   0xb0b1
+		>;
+	};
+};
+
+/* NAND 引脚与 QSPI / USDHC2 复用，必须禁用 */
+&qspi {
+	status = "disabled";
+};
+
+&usdhc2 {
+	status = "disabled";
+};

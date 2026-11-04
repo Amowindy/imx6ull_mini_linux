@@ -164,6 +164,9 @@ x509.genkey
 /allrandom.config
 /allyes.config
 
+# build.sh deploy 的产物收集目录
+/output/
+
 # Kconfig savedefconfig output
 /defconfig
 

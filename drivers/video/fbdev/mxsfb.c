@@ -42,6 +42,8 @@
 
 #include <linux/busfreq-imx.h>
 #include <linux/console.h>
+#include <linux/delay.h>
+#include <linux/gpio.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/of_device.h>
@@ -2197,12 +2199,19 @@ static int mxsfb_probe(struct platform_device *pdev)
 
 	if (gpio_is_valid(gpio)) {
 		ret = devm_gpio_request_one(&pdev->dev, gpio,
-					GPIOF_OUT_INIT_LOW, "lcd_pwr_en");
+						GPIOF_OUT_INIT_LOW, "lcd_pwr_en");
 		if (ret) {
 			dev_err(&pdev->dev,
-			"failed to request gpio %d, ret = %d\n", gpio, ret);
+				"failed to request gpio %d, ret = %d\n", gpio, ret);
 			return ret;
 		}
+
+		/*
+		 * LCD 复位脉冲：与 U-Boot setup_lcd() 一致，
+		 * 拉低 500us 后释放，否则 RGB 屏会一直处于复位状态。
+		 */
+		udelay(500);
+		gpio_set_value(gpio, 1);
 	}
 
 	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
