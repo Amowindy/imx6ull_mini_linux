@@ -157,3 +157,24 @@
 &usdhc2 {
 	status = "disabled";
 };
+
+/*
+ * Mini 底板没有 WM8960 音频编解码器（那是 ALPHA 底板才有的），
+ * 但 dtsi 里 sound-wm8960 / codec / sai2 默认是 okay，probe 时会出现：
+ *   platform sound-wm8960: deferred probe pending:
+ *   fsl-asoc-card: snd_soc_register_card failed
+ * 这里一并禁用，避免无意义的 deferred probe 噪声。
+ */
+/ {
+	sound-wm8960 {
+		status = "disabled";
+	};
+};
+
+&codec {
+	status = "disabled";
+};
+
+&sai2 {
+	status = "disabled";
+};

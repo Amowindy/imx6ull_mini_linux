@@ -20,7 +20,7 @@
 | DDR3L | 256MB，起始地址 `0x80000000` |
 | NAND | GPMI NAND，512MiB，`nand-on-flash-bbt`，minimum ECC |
 | LCD | 7 寸 RGB 屏，31MHz，840x480 时序（与 U-Boot 保持一致） |
-| 以太网 | 仅 ENET2，RMII，PHY 地址 1（KSZ8081 兼容 ID `0022.1560`） |
+| 以太网 | 仅 ENET2，RMII，PHY 地址 1，实板 RTL8201F（实测 ID `001c.c816`），DT 用 C22 自动探测 |
 | 调试串口 | UART1 / `ttymxc0`，115200 |
 | 启动方式 | NAND：U-Boot 从 `0x1400000` 读内核、`0x3400000` 读 DTB |
 
@@ -140,7 +140,70 @@ LCD 复位脚为 `GPIO5_IO09`，已在 pinctrl 中复用为 GPIO，设备树通�
 };
 ```
 
-ENET2 保留上游配置：`phy-mode = "rmii"`、`phy-handle = <&ethphy1>`、PHY 地址 1、`micrel,led-mode` 与 `rmii-ref` 时钟。
+ENET2 配置：`phy-mode = "rmii"`、`phy-handle = <&ethphy1>`、PHY 地址 1、
+`compatible = "ethernet-phy-ieee802.3-c22"` 与 `rmii-ref` 时钟。
+C22 让 `fwnode_get_phy_id()` 返回 `-EINVAL`，走 `get_phy_device()` 按 MDIO
+实读 reg2/3（本板 `0x001cc816`），再命中 `CONFIG_REALTEK_PHY` 的
+`PHY_ID_MATCH_EXACT(0x001cc816)` → "RTL8201F Fast Ethernet"。换料时只要有
+对应 PHY 驱动，DTS 与 defconfig 都不必改。
+
+**PHY 硬件复位（网口不通的真正根因）**：正点原子把 `ENET2_RST` 接在
+`SNVS_TAMPER8 = GPIO5_IO08`（低有效），而 NXP EVK 把这根脚给了
+`spi-gpio` + `74HC595` 的 `enable-gpios`。`gpio-74x164.c:125` 的
+`devm_gpiod_get_optional(&spi->dev, "enable", ...)` 会占用它：
+
+- 不配复位属性时，PHY 可能停在复位态 → MDIO 全 `0xFFFF`
+  （`phydump eth0 1` 的 reg0~7 全 `0xFFFF`、地址 0~7 全无响应）→
+  `Unable to connect to phy` / `NO-CARRIER`；
+- 只配 `phy-reset-gpios` 时，`fec_reset_phy()`（`fec_main.c:4555`）申请
+  `GPIO5_IO08` 拿到 `-EBUSY` → `fec_probe()` `goto failed_reset` →
+  `eth0` 不注册 → `ifconfig eth0 up` 报 `No such device`。
+
+**完整修复四处缺一不可**：
+
+```dts
+/* ① 禁用 EVK 的 spi-gpio + 74HC595 扩展（本板无此硬件） */
+spi-4 {
+	status = "disabled";
+};
+
+/* ② 删除 74HC595 的 enable-gpios = <&gpio5 8 GPIO_ACTIVE_LOW> */
+/* ③ pinctrl_spi4 移除 SNVS_TAMPER8；pinctrl_enet2 增加该脚 */
+pinctrl_enet2: enet2grp {
+	fsl,pins = <
+		/* ... MDC/MDIO/DATA/TX_CLK 等 */
+		MX6UL_PAD_SNVS_TAMPER8__GPIO5_IO08	0x10B0
+	>;
+};
+
+/* ④ 交给 fec_reset_phy() 管理复位 */
+&fec2 {
+	phy-reset-gpios = <&gpio5 8 GPIO_ACTIVE_LOW>;
+	phy-reset-duration = <200>;
+};
+```
+
+时序依据：`fec_main.c:4555` 的 `fec_reset_phy()` 早于 `4591` 的
+`fec_enet_mii_init()`（其内部调用 `of_mdiobus_register()`），因此 MDIO 扫描
+之前 PHY 一定已完成复位并释放；`fec_reset_phy()` 用 `GPIOD_OUT_HIGH` +
+延时 + `gpiod_set_value(0)`，对 `GPIO_ACTIVE_LOW` 即「先拉低复位、延时、
+再释放」。RTL8201F 手册要求复位脉宽 ≥ 10 ms，正点原子官方取 200 ms。
+
+> 复位正常后，`ethernet-phy-ieee802.3-c22` 自动探测即可正常工作（复位在
+> `of_mdiobus_register()` 之前完成，探测时一定能读到有效 ID），因此最终采用
+> C22，不再写死型号。
+
+> **`spi-4` 必须保留 `status = "okay"`**：本板 `reg_can_3v3` 用
+> `gpios = <&gpio_spi 3 GPIO_ACTIVE_LOW>` 从 74HC595 取电，若把整个 `spi-4`
+> 禁用，`gpio_spi` 不会注册，CAN 会报
+> `regulator-can-3v3: can't get GPIO` 与
+> `supplier regulator-can-3v3 not ready`。正确做法是保留节点、只删除
+> 74HC595 的 `enable-gpios`（它才是抢占 `GPIO5_IO08` 的那一项）。
+>
+> **Mini 板无 WM8960**：dtsi 里 `sound-wm8960` / `codec`(`wm8960@1a`) /
+> `&sai2` 默认 okay，但 Mini 底板没有该编解码器（ALPHA 才有），会产生
+> `platform sound-wm8960: deferred probe pending: fsl-asoc-card:
+> snd_soc_register_card failed`。板级 dts 已把它们全部 `status = "disabled"`。
 
 ### 6.4 NAND 与分区
 
@@ -263,7 +326,8 @@ CONFIG_MTD_UBI_BEB_LIMIT=20
 说明：
 
 - `CONFIG_CMDLINE_FROM_BOOTLOADER=y`：优先使用 U-Boot 传入的 `bootargs`；上面的 `CONFIG_CMDLINE` 仅作为后备；
-- `SMSC_PHY` 用于兼容板上可能出现 LAN8720A，`MICREL_PHY` 继续保留以兼容 KSZ8081；
+- `REALTEK_PHY=y` 是实板 RTL8201F 的驱动（必须 built-in，FEC 早期 probe 时模块未加载）；
+  `MICREL_PHY` / `SMSC_PHY` 保留作换料兼容；
 - 关闭 `CONFIG_ARCH_MULTI_V6`，减少无关代码。
 
 ### 7.3 关键配置校验
@@ -277,8 +341,9 @@ CONFIG_MTD_UBI_BEB_LIMIT=20
 | `CONFIG_MTD_UBI` | `y` | UBI 支持 |
 | `CONFIG_UBIFS_FS` | `y` | UBIFS 根文件系统 |
 | `CONFIG_FEC` | `y` | i.MX FEC 以太网 |
-| `CONFIG_MICREL_PHY` | `y` | KSZ8081 PHY |
-| `CONFIG_SMSC_PHY` | `y` | LAN8720A 兼容 |
+| `CONFIG_REALTEK_PHY` | `y` | 实板 RTL8201F PHY 驱动（0x001cc816） |
+| `CONFIG_MICREL_PHY` | `y` | KSZ8081 换料兼容 |
+| `CONFIG_SMSC_PHY` | `y` | LAN8720A 换料兼容 |
 | `CONFIG_FB_MXS` | `y` | LCDIF framebuffer |
 | `CONFIG_SERIAL_IMX_CONSOLE` | `y` | `ttymxc0` 控制台 |
 | `CONFIG_CMDLINE_FROM_BOOTLOADER` | `y` | 使用 U-Boot 启动参数 |
@@ -481,6 +546,17 @@ rootfs 镜像命名与 U-Boot 的 `rootfs_file` 保持一致：`rootfs_nand.ubi`
    分区；U-Boot 侧 `tftp_update rootfs` 采用 `nand write.trimffs` 写入，
    并在擦除前校验镜像大小与 RAM 窗口。
 4. **LCD 时序**：`hactive = 840` 来自 U-Boot 提交，若屏幕为 800x480 需两端同步修改。
-5. **网络 PHY**：当前按 KSZ8081（`ethernet-phy-id0022.1560`）配置，同时启用 SMSC PHY 驱动以兼容 LAN8720A；若实际硬件为 LAN8720A，可根据需要把 compatible 改为 `ethernet-phy-id0007.c0f1`。
+5. **网络 PHY**：实板经 `mii read 1 2/3` 实测为 `0x001CC816`
+   （Realtek RTL8201F），与正点原子资料标注的 LAN8720A 不符。两份 DTS 的
+   `compatible` 用 `ethernet-phy-ieee802.3-c22` 自动探测，Linux defconfig
+   补上 `CONFIG_REALTEK_PHY=y`；Micrel / SMSC 驱动保留作换料兼容。
+   **网口不通的根因是 PHY 复位脚被 74HC595 占用**：`ENET2_RST` 在
+   `SNVS_TAMPER8 = GPIO5_IO08`，NXP EVK 把它给了 `spi-gpio` + `74HC595` 的
+   `enable-gpios`（`gpio-74x164.c:125` 会 `devm_gpiod_get` 占用）。修复：
+   禁用 `spi-4`、删掉该 `enable-gpios`、`pinctrl_spi4` 移除该脚并在
+   `pinctrl_enet2` 中加入、`&fec2` 配 `phy-reset-gpios` +
+   `phy-reset-duration = <200>`，详见 6.3。
+   此前 C22 自动探测失败也是同一原因；修复后已切回 C22 自动探测，
+   换料无需再改 `compatible`（只需内核有对应 PHY 驱动）。
 6. **`all` 会执行 `distclean`（`make mrproper`）**：自定义 `menuconfig` 配置请先执行 `./build.sh savedefconfig`，日常使用 `./build.sh build` 增量编译；`all` 结束会自动 `deploy` 到 `output/` 与 `$HOME/tftp`。
 7. **DTB 命名**：内核 dtb 使用下划线 `imx6ull-14x14-evk_nand.dtb`，与 U-Boot 的 `dtb_file` 严格一致；U-Boot 自身内建 dtb 为 `imx6ull-14x14-evk-nand.dtb`（连字符，用于 U-Boot 驱动）。

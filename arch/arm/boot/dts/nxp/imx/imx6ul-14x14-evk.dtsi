@@ -106,6 +106,16 @@
 		compatible = "spi-gpio";
 		pinctrl-names = "default";
 		pinctrl-0 = <&pinctrl_spi4>;
+		/*
+		 * 这个 spi-gpio + 74HC595 在本板用于 GPIO 扩展：reg_can_3v3 通过
+		 * &gpio_spi 取电，所以节点必须保持 okay。
+		 *
+		 * 但 74HC595 原来的 enable-gpios 指向 GPIO5_IO08（ENET2_RST），
+		 * gpio-74x164.c 的 devm_gpiod_get_optional(..., "enable") 会占用它，
+		 * 导致 fec_reset_phy() 申请失败、fec probe 失败、eth0 不注册。
+		 * 该属性已删除（见 gpio@0 处注释），驱动会跳过 OE 控制，
+		 * 不影响 74HC595 自身的移位输出。
+		 */
 		status = "okay";
 		sck-gpios = <&gpio5 11 0>;
 		mosi-gpios = <&gpio5 10 0>;
@@ -122,7 +132,10 @@
 			registers-number = <1>;
 			registers-default = /bits/ 8 <0x57>;
 			spi-max-frequency = <100000>;
-			enable-gpios = <&gpio5 8 GPIO_ACTIVE_LOW>;
+			/*
+			 * 原 enable-gpios = <&gpio5 8 GPIO_ACTIVE_LOW> 已移除：
+			 * 该脚是 ENET2_RST，改由 &fec2 的 phy-reset-gpios 接管。
+			 */
 		};
 	};
 };
@@ -195,6 +208,25 @@
 	phy-mode = "rmii";
 	phy-handle = <&ethphy1>;
 	phy-supply = <&reg_peri_3v3>;
+	/*
+	 * 正点原子 Mini 把 ENET2_RST 接在 SNVS_TAMPER8 = GPIO5_IO08（低有效）。
+	 * EVK 原始 DTS 把这根脚给了 spi-gpio + 74HC595 的 enable-gpios，
+	 * gpio-74x164.c 会 devm_gpiod_get_optional(..., "enable") 占用它，
+	 * 导致 fec_reset_phy() 申请失败、fec probe 失败、eth0 不注册。
+	 *
+	 * 完整修复（四处配套，缺一不可）：
+	 *   ① spi-4 置为 disabled（本板无 74HC595）
+	 *   ② 删除 74HC595 的 enable-gpios
+	 *   ③ pinctrl_spi4 移除 SNVS_TAMPER8，pinctrl_enet2 加入该脚
+	 *   ④ 这里用 phy-reset-gpios 交给 fec_reset_phy() 管理
+	 *
+	 * 时序：fec_main.c:4555 的 fec_reset_phy() 早于 4591 的
+	 * fec_enet_mii_init()（内含 of_mdiobus_register），保证 MDIO 扫描前
+	 * PHY 已完成复位并释放。RTL8201F 手册要求复位脉宽 >= 10ms，
+	 * 正点原子官方取 200ms。
+	 */
+	phy-reset-gpios = <&gpio5 8 GPIO_ACTIVE_LOW>;
+	phy-reset-duration = <200>;
 	status = "okay";
 
 	mdio {
@@ -202,18 +234,17 @@
 		#size-cells = <0>;
 
 		ethphy0: ethernet-phy@2 {
-			compatible = "ethernet-phy-id0022.1560";
+			compatible = "ethernet-phy-ieee802.3-c22";
 			reg = <2>;
-			micrel,led-mode = <1>;
 			clocks = <&clks IMX6UL_CLK_ENET_REF>;
 			clock-names = "rmii-ref";
 
 		};
 
+		/* ENET2 PHY 地址 1；C22 自动探测：复位正常后内核按 MDIO 实读 ID 匹配驱动 */
 		ethphy1: ethernet-phy@1 {
-			compatible = "ethernet-phy-id0022.1560";
+			compatible = "ethernet-phy-ieee802.3-c22";
 			reg = <1>;
-			micrel,led-mode = <1>;
 			clocks = <&clks IMX6UL_CLK_ENET2_REF>;
 			clock-names = "rmii-ref";
 		};
@@ -496,6 +527,8 @@
 			MX6UL_PAD_ENET2_TX_DATA0__ENET2_TDATA00	0x1b0b0
 			MX6UL_PAD_ENET2_TX_DATA1__ENET2_TDATA01	0x1b0b0
 			MX6UL_PAD_ENET2_TX_CLK__ENET2_REF_CLK2	0x4001b031
+			/* ENET2_RST：正点原子把 ENET2 PHY 复位接在 SNVS_TAMPER8 */
+			MX6UL_PAD_SNVS_TAMPER8__GPIO5_IO08	0x10B0
 		>;
 	};
 
@@ -617,7 +650,13 @@
 			MX6UL_PAD_BOOT_MODE0__GPIO5_IO10	0x70a1
 			MX6UL_PAD_BOOT_MODE1__GPIO5_IO11	0x70a1
 			MX6UL_PAD_SNVS_TAMPER7__GPIO5_IO07	0x70a1
-			MX6UL_PAD_SNVS_TAMPER8__GPIO5_IO08	0x80000000
+			/*
+			 * EVK 原配置还有 MX6UL_PAD_SNVS_TAMPER8__GPIO5_IO08 0x80000000，
+			 * 但正点原子把该引脚改作 ENET2 PHY 复位（ENET2_RST）。
+			 * SPI4 在本板未使用却会 probe 并改写该 pad，导致 PHY 停在复位态、
+			 * MDIO 全部读到 0xFFFF。移除这一行，让复位脚保持上电默认状态。
+			 * 注意：不要再给它加 phy-reset-gpios，那会让 fec probe 失败。
+			 */
 		>;
 	};
 

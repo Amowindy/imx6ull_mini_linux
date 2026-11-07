@@ -620,8 +620,11 @@ CONFIG_CRYPTO_SM3_GENERIC=m
 # ---------------------------------------------------------------------------
 # i.MX6ULL Mini (NAND) 板级补充项
 # ---------------------------------------------------------------------------
-# 单网口 ENET2；SMSC_PHY 兼容板上 LAN8720A（MICREL_PHY 已在基准中启用）
+# 单网口 ENET2；实板 PHY 实测 RTL8201F（0x001cc816），DT 用 C22 自动探测
+# REALTEK_PHY 必须 built-in：FEC 在启动早期 probe，=m 会先绑 Generic PHY
+# MICREL_PHY（基准中）与 SMSC_PHY 保留作换料兼容
 CONFIG_FEC=y
+CONFIG_REALTEK_PHY=y
 CONFIG_SMSC_PHY=y
 # UBI 预留坏块数（与 512MiB NAND 的 440MiB rootfs 分区匹配）
 CONFIG_MTD_UBI_BEB_LIMIT=20
