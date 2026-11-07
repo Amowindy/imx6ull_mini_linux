@@ -22,7 +22,7 @@
 | LCD | 7 寸 RGB 屏，31MHz，840x480 时序（与 U-Boot 保持一致） |
 | 以太网 | 仅 ENET2，RMII，PHY 地址 1（KSZ8081 兼容 ID `0022.1560`） |
 | 调试串口 | UART1 / `ttymxc0`，115200 |
-| 启动方式 | NAND：U-Boot 从 `0xC00000` 读内核、`0x2C00000` 读 DTB |
+| 启动方式 | NAND：U-Boot 从 `0x1400000` 读内核、`0x3400000` 读 DTB |
 
 实测 U-Boot 启动日志与本表一致：
 
@@ -34,7 +34,7 @@ Net:   eth1: ethernet@20b4000 [PRIME]
 ```
 
 > NAND 容量以实机 `NAND: 512 MiB` 为准。早期文档按 256MiB 估算的
-> rootfs 可用空间（192MiB）已作废，实际为 448MiB = `0x1C000000`。
+> rootfs 可用空间（184MiB）已作废，实际为 440MiB = `0x1B800000`。
 
 U-Boot 加载地址与内核启动参数：
 
@@ -43,9 +43,9 @@ loadaddr   = 0x80800000
 fdt_addr   = 0x83000000
 tee_addr   = 0x84000000
 rootfs_addr= 0x85000000
-bootargs   = console=ttymxc0,115200 ubi.mtd=nandrootfs root=ubi0:rootfs \
-             rootfstype=ubifs mtdparts=gpmi-nand:8m(nandboot),4m(env), \
-             32m(nandkernel),16m(nanddtb),4m(nandtee),-(nandrootfs)
+bootargs   = console=ttymxc0,115200 ubi.mtd=rootfs root=ubi0:rootfs \
+             rootfstype=ubifs mtdparts=gpmi-nand:8m(boot),4m(env), \
+             8m(logo),32m(kernel),16m(dtb),4m(tee),-(rootfs)
 ```
 
 ## 3. U-Boot 侧移植记录与对应措施
@@ -161,28 +161,31 @@ GPMI 配置沿用 U-Boot 的 `imx6ull-14x14-evk-nand.dts`：
 
 | MTD 分区 | 起始地址 | 大小 |
 |---|---|---|
-| `nandboot` | `0x00000000` | 8MB |
+| `boot` | `0x00000000` | 8MB |
 | `env` | `0x00800000` | 4MB |
-| `nandkernel` | `0x00C00000` | 32MB |
-| `nanddtb` | `0x02C00000` | 16MB |
-| `nandtee` | `0x03C00000` | 4MB |
-| `nandrootfs` | `0x04000000` | 剩余空间：512MiB NAND 时为 448MiB = `0x1C000000` |
+| `logo` | `0x00C00000` | 8MB |
 
-设备树中定义 `fixed-partitions` 作为无 `mtdparts` 时的后备。`CONFIG_MTD_CMDLINE_PARTS=y` 时 `cmdlinepart` 优先于 `ofpart`，正常启动由 U-Boot 传入的 `mtdparts` 接管，rootfs 按 `-(nandrootfs)` 自动取剩余空间（512MiB 板为 448MiB）。
+`logo` 分区存放 U-Boot 开机 LOGO 的 24bpp BI_RGB BMP，由 U-Boot 启动时按 raw 读取；Linux 侧不使用该分区，换图命令见 U-Boot 移植记录第 5 章（`tftp_update logo`）。
+| `kernel` | `0x01400000` | 32MB |
+| `dtb` | `0x03400000` | 16MB |
+| `tee` | `0x04400000` | 4MB |
+| `rootfs` | `0x04800000` | 剩余空间：512MiB NAND 时为 440MiB = `0x1B800000` |
 
-`fixed-partitions` 无法表达「占满剩余空间」，后备值只能按 512MiB 实机容量写死；这是整个设计里唯一残留的容量假设，已集中为 `NAND_ROOTFS_SIZE`，换用其它容量 NAND 时必须同步修改。`nandboot` / `env` 标记为 `read-only`，避免 Linux 侧误擦 bootloader 与环境变量：
+设备树中定义 `fixed-partitions` 作为无 `mtdparts` 时的后备。`CONFIG_MTD_CMDLINE_PARTS=y` 时 `cmdlinepart` 优先于 `ofpart`，正常启动由 U-Boot 传入的 `mtdparts` 接管，rootfs 按 `-(rootfs)` 自动取剩余空间（512MiB 板为 440MiB）。
+
+`fixed-partitions` 无法表达「占满剩余空间」，后备值只能按 512MiB 实机容量写死；这是整个设计里唯一残留的容量假设，已集中为 `NAND_ROOTFS_SIZE`，换用其它容量 NAND 时必须同步修改。`boot` / `env` 标记为 `read-only`，避免 Linux 侧误擦 bootloader 与环境变量：
 
 ```dts
-#define NAND_ROOTFS_SIZE 0x1c000000  /* 448MiB = 512MiB NAND - 64MiB 前置分区 */
+#define NAND_ROOTFS_SIZE 0x1b800000  /* 440MiB = 512MiB NAND - 72MiB 前置分区 */
 partition@0 {
-	label = "nandboot";
+	label = "boot";
 	reg = <0x00000000 0x00800000>;
 	read-only;
 };
 ...
 partition@4000000 {
-	label = "nandrootfs";
-	reg = <0x04000000 NAND_ROOTFS_SIZE>;
+	label = "rootfs";
+	reg = <0x04800000 NAND_ROOTFS_SIZE>;
 };
 ```
 
@@ -248,7 +251,7 @@ CONFIG_ARCH_MULTI_V7=y
 
 ```text
 CONFIG_LOCALVERSION="-imx6ull-mini-nand"
-CONFIG_CMDLINE="noinitrd console=ttymxc0,115200 ubi.mtd=nandrootfs root=ubi0:rootfs rootfstype=ubifs mtdparts=gpmi-nand:8m(nandboot),4m(env),32m(nandkernel),16m(nanddtb),4m(nandtee),-(nandrootfs)"
+CONFIG_CMDLINE="noinitrd console=ttymxc0,115200 ubi.mtd=rootfs root=ubi0:rootfs rootfstype=ubifs mtdparts=gpmi-nand:8m(boot),4m(env),8m(logo),32m(kernel),16m(dtb),4m(tee),-(rootfs)"
 CONFIG_CMDLINE_FROM_BOOTLOADER=y
 CONFIG_FEC=y
 CONFIG_SMSC_PHY=y
@@ -409,8 +412,8 @@ fec1:            status = "disabled"
 ethernet-phy@2:  status = "disabled"
 lcdif:           enable-gpio = <&gpio5 9 GPIO_ACTIVE_HIGH>
 gpmi:            status = "okay"
-分区:            nandboot/env/nandkernel/nanddtb/nandtee/nandrootfs
-nandrootfs:      reg = <0x4000000 0x1c000000>  (448MiB)
+分区:            boot/env/kernel/dtb/tee/rootfs
+rootfs:      reg = <0x4800000 0x1b800000>  (440MiB)
 ```
 
 ## 10. 使用流程
@@ -445,17 +448,17 @@ tftp_update dtb
 或直接启动：
 
 ```text
-nand read ${loadaddr} 0xC00000 0x2000000
-nand read ${fdt_addr} 0x2C00000 0x100000
+nand read ${loadaddr} 0x1400000 0x2000000
+nand read ${fdt_addr} 0x3400000 0x100000
 bootz ${loadaddr} - ${fdt_addr}
 ```
 
 ### 10.3 根文件系统
 
-`nandrootfs` 分区使用 UBI + UBIFS：
+`rootfs` 分区使用 UBI + UBIFS：
 
 ```text
-ubi.mtd=nandrootfs root=ubi0:rootfs rootfstype=ubifs
+ubi.mtd=rootfs root=ubi0:rootfs rootfstype=ubifs
 ```
 
 rootfs 镜像命名与 U-Boot 的 `rootfs_file` 保持一致：`rootfs_nand.ubi`。
@@ -467,8 +470,8 @@ rootfs 镜像命名与 U-Boot 的 `rootfs_file` 保持一致：`rootfs_nand.ubi`
    内核 `CONFIG_CMDLINE`、内核设备树 `fixed-partitions`；`bootcmd` 中的
    `nand read` 偏移/长度也要跟着调整。默认环境变量改动后，板上需执行
    `env default -a; saveenv` 才会生效。
-2. **rootfs 大小**：`-(nandrootfs)` 由 `cmdlinepart` 按 ONFI 探测容量动态计算，
-   实机 512MiB NAND 下为 448MiB（`0x1C000000`），256MiB 下为 192MiB。
+2. **rootfs 大小**：`-(rootfs)` 由 `cmdlinepart` 按 ONFI 探测容量动态计算，
+   实机 512MiB NAND 下为 440MiB（`0x1B800000`），256MiB 下为 184MiB。
    设备树 `fixed-partitions` 无法表达「占满剩余空间」，其
    `NAND_ROOTFS_SIZE` 是本设计里**唯一写死的容量假设**（仅作后备），
    换用其它容量 NAND 时必须同步修改；它只在 cmdlinepart 未生效时起作用。

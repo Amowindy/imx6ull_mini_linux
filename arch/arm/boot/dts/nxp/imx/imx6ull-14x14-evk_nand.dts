@@ -16,12 +16,12 @@
 #include "imx6ull-14x14-evk.dts"
 
 /*
- * 后备分区表里 nandrootfs 的大小：fixed-partitions 无法表达
+ * 后备分区表里 rootfs 的大小：fixed-partitions 无法表达
  * 「占满剩余空间」，只能按本板实机 512MiB NAND 写死。
  * 正常启动由 mtdparts 的 cmdlinepart 解析器接管，不使用这个值；
  * 换用其它容量 NAND 时必须同步修改这里。
  */
-#define NAND_ROOTFS_SIZE 0x1c000000	/* 448MiB = 512MiB NAND - 64MiB 前置分区 */
+#define NAND_ROOTFS_SIZE 0x1b800000	/* 440MiB = 512MiB NAND - 72MiB 前置分区 */
 
 / {
 	model = "i.MX6ULL Mini NAND Board";
@@ -73,11 +73,11 @@
 	/*
 	 * 后备分区表：与 U-Boot 的 CONFIG_MTDPARTS_DEFAULT / bootargs 一致。
 	 * 内核 CONFIG_MTD_CMDLINE_PARTS=y 时 cmdlinepart 优先于 ofpart，
-	 * U-Boot 传入 mtdparts 后 rootfs 由 -(nandrootfs) 按 ONFI 探测到的
+	 * U-Boot 传入 mtdparts 后 rootfs 由 -(rootfs) 按 ONFI 探测到的
 	 * 实际容量动态取剩余空间，这张表不会生效。
 	 *
 	 * fixed-partitions 无法表达「占满剩余空间」，所以 NAND_ROOTFS_SIZE
-	 * 只能按本板实机 512MiB NAND 写死：0x20000000 - 0x04000000。
+	 * 只能按本板实机 512MiB NAND 写死：0x20000000 - 0x04800000。
 	 * 这是整个设计里唯一残留的容量假设：换用其它容量 NAND 时，
 	 * 必须同步修改 NAND_ROOTFS_SIZE（或改用带正确 mtdparts 的启动参数）。
 	 * 另外 UBI 会扣除坏块与自身元数据开销，实际可用卷空间小于该值。
@@ -88,7 +88,7 @@
 		#size-cells = <1>;
 
 		partition@0 {
-			label = "nandboot";
+			label = "boot";
 			reg = <0x00000000 0x00800000>;
 			read-only;	/* SPL / U-Boot / FCB，误擦会变砖 */
 		};
@@ -100,23 +100,28 @@
 		};
 
 		partition@c00000 {
-			label = "nandkernel";
-			reg = <0x00c00000 0x02000000>;
+			label = "logo";
+			reg = <0x00c00000 0x00800000>;
 		};
 
-		partition@2c00000 {
-			label = "nanddtb";
-			reg = <0x02c00000 0x01000000>;
+		partition@1400000 {
+			label = "kernel";
+			reg = <0x01400000 0x02000000>;
 		};
 
-		partition@3c00000 {
-			label = "nandtee";
-			reg = <0x03c00000 0x00400000>;
+		partition@3400000 {
+			label = "dtb";
+			reg = <0x03400000 0x01000000>;
 		};
 
-		partition@4000000 {
-			label = "nandrootfs";
-			reg = <0x04000000 NAND_ROOTFS_SIZE>;
+		partition@4400000 {
+			label = "tee";
+			reg = <0x04400000 0x00400000>;
+		};
+
+		partition@4800000 {
+			label = "rootfs";
+			reg = <0x04800000 NAND_ROOTFS_SIZE>;
 		};
 	};
 };

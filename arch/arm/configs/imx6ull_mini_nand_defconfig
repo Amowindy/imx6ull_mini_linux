@@ -5,9 +5,9 @@
 #   imx_v6_v7_defconfig 中的 ARMv6/i.MX5 等无关代码。
 #
 # 与 U-Boot 的 mx6ull_14x14_evk_nand_defconfig 配套:
-#   - NAND 分区: 8m(nandboot),4m(env),32m(nandkernel),16m(nanddtb),
-#                4m(nandtee),-(nandrootfs)
-#   - 根文件系统: ubi.mtd=nandrootfs root=ubi0:rootfs rootfstype=ubifs
+#   - NAND 分区: 8m(boot),4m(env),8m(logo),32m(kernel),
+#                16m(dtb),4m(tee),-(rootfs)
+#   - 根文件系统: ubi.mtd=rootfs root=ubi0:rootfs rootfstype=ubifs
 #   - 控制台: ttymxc0,115200
 #
 # 关键驱动 (GPMI NAND / UBI / UBIFS / FEC / MICREL_PHY / SMSC_PHY /
@@ -48,7 +48,7 @@ CONFIG_HIGHMEM=y
 CONFIG_ARCH_FORCE_MAX_ORDER=13
 CONFIG_LOCALVERSION="-imx6ull-mini-nand"
 # 与 U-Boot 的 MFG_NAND_PARTITION / bootargs 保持一致，作为 bootargs 缺省值
-CONFIG_CMDLINE="noinitrd console=ttymxc0,115200 ubi.mtd=nandrootfs root=ubi0:rootfs rootfstype=ubifs mtdparts=gpmi-nand:8m(nandboot),4m(env),32m(nandkernel),16m(nanddtb),4m(nandtee),-(nandrootfs)"
+CONFIG_CMDLINE="noinitrd console=ttymxc0,115200 ubi.mtd=rootfs root=ubi0:rootfs rootfstype=ubifs mtdparts=gpmi-nand:8m(boot),4m(env),8m(logo),32m(kernel),16m(dtb),4m(tee),-(rootfs)"
 CONFIG_CMDLINE_FROM_BOOTLOADER=y
 CONFIG_KEXEC=y
 CONFIG_CPU_FREQ=y
@@ -623,5 +623,5 @@ CONFIG_CRYPTO_SM3_GENERIC=m
 # 单网口 ENET2；SMSC_PHY 兼容板上 LAN8720A（MICREL_PHY 已在基准中启用）
 CONFIG_FEC=y
 CONFIG_SMSC_PHY=y
-# UBI 预留坏块数（与 512MiB NAND 的 448MiB rootfs 分区匹配）
+# UBI 预留坏块数（与 512MiB NAND 的 440MiB rootfs 分区匹配）
 CONFIG_MTD_UBI_BEB_LIMIT=20
