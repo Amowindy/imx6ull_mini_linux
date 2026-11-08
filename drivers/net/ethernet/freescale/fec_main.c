@@ -3604,8 +3604,10 @@ fec_enet_open(struct net_device *ndev)
 	if (ret)
 		goto err_enet_mii_probe;
 
+#ifdef CONFIG_SOC_IMX6Q
 	if (fep->quirks & FEC_QUIRK_ERR006687)
 		imx6q_cpuidle_fec_irqs_used();
+#endif
 
 	if (fep->quirks & FEC_QUIRK_HAS_PMQOS)
 		cpu_latency_qos_add_request(&fep->pm_qos_req, 0);
@@ -3647,8 +3649,10 @@ fec_enet_close(struct net_device *ndev)
 	phy_disconnect(ndev->phydev);
 	ndev->phydev = NULL;
 
+#ifdef CONFIG_SOC_IMX6Q
 	if (fep->quirks & FEC_QUIRK_ERR006687)
 		imx6q_cpuidle_fec_irqs_unused();
+#endif
 
 	fec_enet_update_ethtool_stats(ndev);
 

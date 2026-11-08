@@ -96,7 +96,7 @@ show_help() {
     echo "  savedefconfig- 将当前 .config 回写为 ${DEFCONFIG} (别名 saveconfig)"
     echo "  build        - 仅编译 (不重新配置)"
     echo "  dtbs         - 仅编译 ${DTB}.dtb"
-    echo "  modules      - 仅编译内核模块"
+    echo "  modules      - 仅编译内核模块（CONFIG_MODULES=n 时跳过）"
     echo "  deploy       - 拷贝 zImage 与 dtb 到 ${OUT_DIR}，并发布到 ${DEFAULT_TFTP_DIR}"
     echo "  info         - 显示当前编译配置信息"
     echo "  help         - 显示此帮助信息"
@@ -276,6 +276,11 @@ do_dtbs() {
 do_modules() {
     check_toolchain
     check_config
+
+    if ! grep -q '^CONFIG_MODULES=y' .config; then
+        echo -e "${YELLOW}CONFIG_MODULES=n，当前配置不生成内核模块${NC}"
+        return 0
+    fi
 
     run_make "编译内核模块 (${JOBS} 线程)" "${MAKE_ARGS[@]}" modules
 }

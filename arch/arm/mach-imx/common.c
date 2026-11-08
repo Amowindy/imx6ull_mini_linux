@@ -133,7 +133,12 @@ void mx6_lpddr2_freq_change(u32 freq, int bus_freq_mode) {}
 void imx6sll_lpddr2_freq_change(u32 freq, int bus_freq_mode) {}
 #endif
 
-#if !defined(CONFIG_SOC_IMX6SX) && !defined(CONFIG_SOC_IMX6UL)
+/*
+ * i.MX6ULL 没有对应的 DDR/LPDDR 频率切换汇编实现（那些只在
+ * i.MX6Q/SX 等 SoC 上提供），因此这里提供空实现。busfreq 节点已
+ * 在 DTS 中禁用，不会真正触发 DDR 降频。
+ */
+#if !defined(CONFIG_SOC_IMX6SX)
 u32 imx6_up_ddr3_freq_change_start, imx6_up_ddr3_freq_change_end;
 struct imx6_busfreq_info {
 } __aligned(8);

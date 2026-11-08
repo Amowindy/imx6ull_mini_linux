@@ -1469,7 +1469,16 @@ static int mxsfb_init_fbinfo(struct mxsfb_info *host)
 
 	fb_info->fix.line_length =
 		fb_info->var.xres * (fb_info->var.bits_per_pixel >> 3);
-	fb_info->fix.smem_len = SZ_32M;
+
+	/*
+	 * 原厂这里固定申请 32MiB，但本板 840x480x16bpp 实际不到 1MiB，
+	 * 32MiB 会耗尽 16MiB CMA，导致 probe 失败、/dev/fb0 不存在。
+	 * 按实际分辨率分配，至少保留 2MiB 供 ypan/双缓冲使用。
+	 */
+	fb_info->fix.smem_len = PAGE_ALIGN(fb_info->var.yres_virtual *
+					   fb_info->fix.line_length);
+	if (fb_info->fix.smem_len < SZ_2M)
+		fb_info->fix.smem_len = SZ_2M;
 
 	/* Memory allocation for framebuffer */
 	if (mxsfb_map_videomem(fb_info) < 0)
