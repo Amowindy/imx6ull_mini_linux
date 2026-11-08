@@ -30,6 +30,27 @@ config LOGO_LINUX_CLUT224
 	bool "Standard 224-color Linux logo"
 	default y
 
+config LOGO_MINI_CLUT224
+	bool "i.MX6ULL Mini custom full-screen 224-color logo"
+	help
+	  Select this to use the board-specific full-screen boot logo for the
+	  i.MX6ULL Mini NAND board instead of the generic Linux penguin.
+
+	  The logo is a 840x480 white-background image stored as
+	  logo_mini_clut224.ppm, a plain (P3) PPM file with at most 224
+	  colours.  At build time the pnmtologo host tool converts it into a
+	  C array of indexed pixels plus a colour lookup table, which is
+	  linked into the kernel.  Because the logo covers the whole screen,
+	  the framebuffer console has no usable text rows left.
+
+	  When enabled, fb_find_logo() returns this logo for framebuffers
+	  with a colour depth of 8 bits per pixel or more, taking precedence
+	  over CONFIG_LOGO_LINUX_CLUT224 and the other standard logos.  The
+	  image data is placed in the __initconst section and freed after
+	  boot, so the logo is drawn only once.
+
+	  If unsure, say N.
+
 config LOGO_DEC_CLUT224
 	bool "224-color Digital Equipment Corporation Linux logo"
 	depends on MACH_DECSTATION || ALPHA

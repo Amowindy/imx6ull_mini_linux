@@ -100,6 +100,10 @@ const struct linux_logo * __ref fb_find_logo(int depth)
 		/* SuperH Linux logo */
 		logo = &logo_superh_clut224;
 #endif
+#ifdef CONFIG_LOGO_MINI_CLUT224
+		/* Board-specific full-screen logo, takes precedence */
+		logo = &logo_mini_clut224;
+#endif
 	}
 	return logo;
 }

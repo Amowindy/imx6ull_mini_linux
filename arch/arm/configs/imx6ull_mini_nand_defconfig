@@ -1,20 +1,25 @@
 # i.MX6ULL Mini (NAND) 板级配置（无模块版）
 #
 # 基准: imx_v7_defconfig -> 只保留 i.MX6ULL 与本板实际外设
-# 硬件: DDR3L 256MiB, NAND 512MiB, ENET2 RTL8201F, 7 寸 RGB LCD,
+# 硬件: DDR3L 256MiB, NAND 512MiB, ENET2 RTL8201F, 4.3 寸 RGB888 LCD,
 #       TF 卡, USB OTG/HOST, CAN1, UART3(RS232/485/GPS), I2C2(ATK),
 #       LED, 蜂鸣器, KEY0
 #
-# 关键 (2026-11-07):
+# 关键 (2026-11-08):
 #   CONFIG_MODULES=n，全部驱动 built-in，不生成 .ko
-#   CONFIG_ARCH_FORCE_MAX_ORDER=10：i.MX6ULL 无 IPU/VPU/GPU，不需要
-#       imx_v7 的 13；降到 10 后 pageblock=4MiB，CMA 16MiB 不再被
-#       向上取整到 32MiB（否则 imx_v7 的 13 会让 CMA 最小 32MiB）
-#   CONFIG_CMA_SIZE_MBYTES=16
-#   启用: KEXEC、CGROUPS/NAMESPACES（systemd）、nftables、USB_GADGET、
-#         iptables、Dynamic Debug/KPROBES
+#   CONFIG_ARCH_FORCE_MAX_ORDER=10：CMA 16MiB 不再被取整到 32MiB
+#   启动画面：CONFIG_LOGO_MINI_CLUT224=y，自定义全屏白底 840x480 logo
+#     - 源图 linux_logo.png -> drivers/video/logo/logo_mini_clut224.ppm (P3/224色)
+#     - 关闭标准企鹅 mono/vga16/clut224
+#     - 全屏 logo 使 fbcon 文字区为 0 行，LCD 只显示图片
+#   CONFIG_CMDLINE_EXTEND=y + CMDLINE="vt.global_cursor_default=0 consoleblank=0"
+#     - 关掉闪烁光标、禁用 10 分钟自动黑屏
+#     - U-Boot bootargs 仍提供 console/root/mtdparts
+#     - console=ttymxc0 保持，printk 不进 LCD
+#   启用: KEXEC、CGROUPS/NAMESPACES、nftables、USB_GADGET、iptables、
+#         Dynamic Debug/KPROBES
 #   关闭: CRASH_DUMP/FTRACE、PM_DEBUG/PM_TEST_SUSPEND、USER_NS、
-#         CRYPTO_TLS/AUTHENC、SAHARA/CAAM SECVIO
+#         CRYPTO_TLS/AUTHENC、SAHARA/CAAM SECVIO、PCI
 #   保留: NETFILTER/iptables、IPv6、NFS、USB storage、JFFS2、FB_MXC、
 #         MTD_UBI_BLOCK、CPU governors、VLAN、FAT16
 #
@@ -54,7 +59,8 @@ CONFIG_HAVE_ARM_ARCH_TIMER=y
 CONFIG_VMSPLIT_2G=y
 CONFIG_ARM_PSCI=y
 CONFIG_HIGHMEM=y
-CONFIG_CMDLINE="noinitrd console=ttymxc0,115200 ubi.mtd=rootfs root=ubi0:rootfs rootfstype=ubifs mtdparts=gpmi-nand:8m(boot),4m(env),8m(logo),32m(kernel),16m(dtb),4m(tee),-(rootfs)"
+CONFIG_CMDLINE="vt.global_cursor_default=0 consoleblank=0"
+CONFIG_CMDLINE_EXTEND=y
 CONFIG_CPU_FREQ=y
 CONFIG_CPU_FREQ_STAT=y
 CONFIG_CPU_FREQ_DEFAULT_GOV_ONDEMAND=y
@@ -73,9 +79,6 @@ CONFIG_KPROBES=y
 CONFIG_BINFMT_MISC=y
 # CONFIG_COMPAT_BRK is not set
 CONFIG_CMA=y
-CONFIG_CMA_SIZE_MBYTES=16
-CONFIG_CMA_SIZE_SEL_MBYTES=y
-CONFIG_ARCH_FORCE_MAX_ORDER=10
 CONFIG_NET=y
 CONFIG_PACKET=y
 CONFIG_UNIX=y
@@ -250,6 +253,10 @@ CONFIG_BACKLIGHT_GPIO=y
 CONFIG_FRAMEBUFFER_CONSOLE=y
 CONFIG_FRAMEBUFFER_CONSOLE_DETECT_PRIMARY=y
 CONFIG_LOGO=y
+# CONFIG_LOGO_LINUX_MONO is not set
+# CONFIG_LOGO_LINUX_VGA16 is not set
+# CONFIG_LOGO_LINUX_CLUT224 is not set
+CONFIG_LOGO_MINI_CLUT224=y
 CONFIG_HID_MULTITOUCH=y
 CONFIG_USB=y
 CONFIG_USB_ANNOUNCE_NEW_DEVICES=y

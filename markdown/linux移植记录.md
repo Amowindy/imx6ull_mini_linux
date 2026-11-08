@@ -493,6 +493,50 @@ defconfig 从 630 行裁剪到 406 行，只保留 i.MX6ULL 与本板实际外�
 - P2/P3 可选功能（容器、IPv6、NFS、USB 存储、USB Gadget、PM、CPU governor）
 - P4 建议关闭（KEXEC、CRASH_DUMP、PM_DEBUG、JFFS2、SAHARA、CAAM SECVIO 等）
 
+### 7.7 自定义全屏启动画面（2026-11-08）
+
+采用**方案 A2**：新增板级 logo 文件与 Kconfig 项，不改动内核自带的
+`logo_linux_clut224.ppm`。
+
+| 文件 | 改动 |
+|---|---|
+| `drivers/video/logo/logo_mini_clut224.ppm` | 新增，P3 ASCII PPM，840x480，224 色，白底 |
+| `drivers/video/logo/Kconfig` | 新增 `CONFIG_LOGO_MINI_CLUT224` |
+| `drivers/video/logo/Makefile` | 新增 `logo_mini_clut224.o`（.c 由 `pnmtologo` 自动生成） |
+| `include/linux/linux_logo.h` | 新增 `extern const struct linux_logo logo_mini_clut224;` |
+| `drivers/video/logo/logo.c` | `depth >= 8` 分支末尾优先返回板级 logo |
+| defconfig | `LOGO_MINI_CLUT224=y`，关闭 mono/vga16/clut224 三个标准 logo |
+
+图片生成（源图 `linux_logo.png`，2656x1600 RGBA 白底）：
+
+```text
+等比缩放 797x480 → 居中贴到 840x480 纯白画布（不变形、左右各 21px 白边）
+→ MEDIANCUT 量化 224 色、无抖动（白底不产生噪点）
+→ 强制调色板最接近白的项为纯 (255,255,255)
+→ 输出 P3 PPM（pnmtologo 不接受 PNG/P6 二进制 PNM）
+→ 840*480 = 403200 字节数据 + 224*3 字节 clut，编进 __initconst
+```
+
+**"只显示图片、不要 VT 终端"的实现**：内核 logo 由
+`fbcon_switch() → fb_show_logo()` 绘制，因此 `CONFIG_VT` 与
+`CONFIG_FRAMEBUFFER_CONSOLE` 必须保留；做法是"不给 fbcon 任何文字/光标"：
+
+- 全屏 480px → `logo_lines = 30`，`vc_top = 30 = vc_bottom`，文字区 0 行；
+  `fb_show_logo` 画完白图后 `update_region()` 长度为 0，不覆盖图案；
+- `console=ttymxc0` 保持单 console，printk 不进 LCD；
+- `inittab` 只在 `ttymxc0` 起 shell，不在 tty1 起 getty；
+- `CONFIG_CMDLINE_EXTEND=y` +
+  `CONFIG_CMDLINE="vt.global_cursor_default=0 consoleblank=0"`：
+  U-Boot bootargs 仍完整（root/mtdparts/console），内核追加这两个参数，
+  关掉下划线光标与 10 分钟自动黑屏（`blank_screen` 会清掉图片）；
+- `CONFIG_ARCH_FORCE_MAX_ORDER=10` 保证 CMA 是 16MiB，全屏 logo 能分配成功。
+
+> 注意：`vt.global_cursor_default` 使 `vc_deccm=0`，`fbcon_cursor()` 直接
+> 返回，闪烁 work 不启动。若以后想恢复光标，去掉该参数即可。
+> logo 数据在 `__initconst`，`late_initcall_sync` 后 `logos_freed=true`，
+> 启动完成后内核无法再重画；**用户态程序一旦写 `/dev/fb0` 或触发 VT
+> 滚动/清屏，图案就会被覆盖且不可恢复**。
+
 ## 8. build.sh 设计
 
 脚本结构对齐 U-Boot 最终版 `build.sh`：
