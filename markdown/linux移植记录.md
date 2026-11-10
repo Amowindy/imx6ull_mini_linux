@@ -27,7 +27,7 @@
 | 人机接口 | 红色状态 LED（GPIO1_IO03）、有源蜂鸣器（GPIO5_IO01）、KEY0（GPIO1_IO18） |
 | 现场总线 | CAN1（TJA1050）；UART3 经跳线选择 RS232/RS485/GPS |
 | 模块接口 | ATK 模块（I2C2 + UART3）；摄像头接口（CSI，无传感器） |
-| 本方案未启用 | WM8960 音频、OV5640 摄像头驱动、AP3216C/ICM20608、SDIO WiFi、触摸屏 |
+| 本方案未启用 | WM8960 音频（走 USB 声卡）、AP3216C/ICM20608、SDIO WiFi、QSPI、USDHC2 |
 | 启动方式 | NAND：U-Boot 从 `0x1400000` 读内核、`0x3400000` 读 DTB |
 
 实测 U-Boot 启动日志与本表一致：
@@ -94,7 +94,7 @@ bootargs   = console=ttymxc0,115200 ubi.mtd=rootfs root=ubi0:rootfs \
 | `arch/arm/configs/imx6ull_mini_nand_defconfig` | 新增 | 基于 `imx_v7_defconfig` 裁剪的板级配置 |
 | `arch/arm/boot/dts/nxp/imx/imx6ull-14x14-evk_nand.dts` | 新增 | 独立最小设备树（只 include `imx6ull.dtsi`） |
 | `arch/arm/boot/dts/nxp/imx/Makefile` | 修改 | 注册 `imx6ull-14x14-evk_nand.dtb` |
-| `drivers/video/fbdev/mxsfb.c` | 修改 | 支持 LCD 复位脉冲（`enable-gpio`） |
+| `drivers/video/fbdev/mxsfb.c` | 未修改 | 上游原生支持 `enable-gpio`；本板按原理图确认不需要，DTS 不再提供该属性 |
 | `drivers/net/ethernet/freescale/fec_main.c` | 修改 | 仅在 `CONFIG_SOC_IMX6Q` 下调用 i.MX6Q cpuidle 钩子 |
 | `arch/arm/mach-imx/common.c` | 修改 | 为 i.MX6ULL 提供 DDR3/LPDDR2 频率切换空实现（busfreq 已禁用） |
 | `build.sh` | 新增 | 内核构建脚本（对齐 U-Boot 最终版） |
@@ -138,11 +138,15 @@ U-Boot 的 `imximage_256M.cfg` 将 DDR 配置为 256MB，设备树同步覆盖�
 };
 ```
 
-LCD 复位脚为 `GPIO5_IO09`，已在 pinctrl 中复用为 GPIO，设备树通过 `enable-gpio` 交给 `mxsfb` 驱动：
+LCD 的 RESET 接整板复位网络（LCD 接口 pin40 / 核心板 A40），与 MCU 共用
+复位按键，软件不需要 GPIO 控制；`GPIO5_IO09` 实际是触摸屏 `CT_RST`，
+本板未启用。详见 6.6 节。因此 `&lcdif` 里**没有** `enable-gpio`：
 
 ```dts
 &lcdif {
-	enable-gpio = <&gpio5 9 GPIO_ACTIVE_HIGH>;
+	pinctrl-0 = <&pinctrl_lcdif_dat &pinctrl_lcdif_ctrl>;
+	display = <&display0>;
+	status = "okay";
 };
 ```
 
@@ -321,30 +325,141 @@ NAND 与 QSPI、USDHC2 复用引脚，必须禁用：
 };
 ```
 
-### 6.6 LCD 复位
+### 6.6 LCD 复位与背光（2026-11-10 按底板原理图核对修正）
 
-U-Boot `setup_lcd()` 会通过 `GPIO5_IO09` 产生复位脉冲；内核 `mxsfb` 原先只把 `enable-gpio` 初始化为低电平，不会释放。驱动补充：
+依据 `markdown/IMX6ULL_MINI_V2.2(Mini底板原理图).pdf`（5 页，Altium 导出），
+LCD 40pin 接口（J10）的引脚分配为：
 
-```c
-if (gpio_is_valid(gpio)) {
-	ret = devm_gpio_request_one(&pdev->dev, gpio,
-					GPIOF_OUT_INIT_LOW, "lcd_pwr_en");
-	if (ret) {
-		dev_err(&pdev->dev,
-			"failed to request gpio %d, ret = %d\n", gpio, ret);
-		return ret;
-	}
-
-	/*
-	 * LCD 复位脉冲：与 U-Boot setup_lcd() 一致，
-	 * 拉低 500us 后释放，否则 RGB 屏会一直处于复位状态。
-	 */
-	udelay(500);
-	gpio_set_value(gpio, 1);
-}
+```text
+pin40 = RESET    ← 来自核心板 A40，接整板复位网络（复位按键 KEY4、与 MCU 共用）
+pin39 = CT_INT   ← 核心板 B15 = GPIO_9 = GPIO1_IO09，触摸中断，10K 上拉
+pin38 = I2C2_SCL ← 核心板 B31 = UART5_TXD
+pin36 = I2C2_SDA ← 核心板 B32 = UART5_RXD
+pin35 = CT_RST   ← 核心板 A48 = SNVS_TAMPER9 = GPIO5_IO09，触摸复位，10K 上拉
+pin34 = BLT_PWM  ← 核心板 B16 = GPIO_8 = GPIO1_IO08，背光
 ```
 
-同时新增 `#include <linux/delay.h>` 和 `#include <linux/gpio.h>`。
+**原来两处错误**（早期误以为 `SNVS_TAMPER9 / GPIO5_IO09` 是 LCD 复位）：
+
+1. U-Boot `setup_lcd()` 对 `IMX_GPIO_NR(5, 9)` 发 500us 低脉冲；
+   U-Boot 的 `pinctrl_lcdif_ctrl` 里还把 `SNVS_TAMPER9__GPIO5_IO09` 塞进了
+   LCD 控制引脚组。
+2. 内核 `&lcdif` 里有 `enable-gpio = <&gpio5 9 GPIO_ACTIVE_HIGH>` +
+   `pinctrl_lcdif_reset`（iomuxc_snvs 下复用为 GPIO5_IO09），
+   `mxsfb.c` 会 `devm_gpio_request_one(..., GPIOF_OUT_INIT_LOW)` 后
+   `udelay(500)` 再拉高。
+
+这些动作实际是在**给电容触摸屏发复位脉冲**，不是 LCD。LCD 真正的 RESET
+是上电时由整板复位电路一次性完成的，软件不需要（也不应该）再拉。
+`CT_RST` 现在由 &i2c2 里 gt9xx 节点的 `reset-gpios` 正确驱动（见 6.6.2）。
+
+**修正**：删除 U-Boot 的 GPIO5_IO09 复位脉冲和 `pinctrl_lcdif_ctrl` 里的
+`SNVS_TAMPER9` 项；删除内核 `enable-gpio`、`&pinctrl_lcdif_reset` 引用及
+`pinctrl_lcdif_reset` 定义。`mxsfb` 的 `of_get_named_gpio()` 取不到属性时
+`gpio_is_valid()` 为假，整段跳过，驱动行为不受影响。
+
+> 顺带核对（同样来自原理图，均与 DTS 一致）：
+> `KEY0` = 核心板 B48 = `UART1_CTS`；`LED0` = B47 = `GPIO_3`；
+> `BEEP` = B5 = `SNVS_TAMPER1`；`CSI_RESET` = B13 = `GPIO_2`；
+> `CSI_PWDN` = B14 = `GPIO_4`；摄像头 P1 是 Header 9X2，含
+> `CSI_DATA0~7` + HSYNC/VSYNC/PIXCLK/MCLK + PWDN/RESET + I2C2_SCL/SDA。
+
+### 6.6.1 电容触摸屏（2026-11-10 按原理图补全）
+
+4.3 寸 800x480 屏（正点原子屏 ID `0x04`）带电容触摸，触控 IC 为 Goodix
+GT9xx 系列（GT9147 / GT1151 等），挂在 **I2C2**，与 OV5640 共用总线。
+底板原理图只到 LCD 40pin 接口，触控 IC 在屏模组内，因此具体料号与
+I2C 地址不能从底板 PDF 读出，按下述方式处理。
+
+```text
+I2C2_SCL / SDA : LCD pin38 / pin36 → 核心板 B31/B32 (UART5_TXD/RXD)
+CT_INT         : LCD pin39         → GPIO1_IO09，底板 R18 10K 上拉（触摸时拉低）
+CT_RST         : LCD pin35         → SNVS_TAMPER9 = GPIO5_IO09，R19 10K 上拉
+VDD            : 底板 DCDC_3V3 直连，不可控
+```
+
+DTS 要点：
+
+- `&i2c2` 合并为一个节点，同时挂 `gt9xx@14` 与 `ov5640@3c`（地址不冲突）。
+- `pinctrl_tsc_int`（`MX6UL_PAD_GPIO1_IO09__GPIO1_IO09`）放在 `&iomuxc`；
+  `pinctrl_tsc_reset`（`MX6ULL_PAD_SNVS_TAMPER9__GPIO5_IO09`）放在
+  `&iomuxc_snvs`。**两者属不同 IOMUXC 域，不能合并到同一组**。
+- `irq-gpios` + `reset-gpios` 必须同时提供：mainline `goodix.c` 只有
+  在 `IRQ_PIN_ACCESS_GPIO` 模式下才会在 probe 时按 `reg` 主动把芯片
+  配置成对应 I2C 地址（复位时序中拉高 INT 选 `0x14`、拉低选 `0x5D`），
+  从而避免"教程写 0x5d 但实板在 0x14"这类地址不匹配。
+- **两个 GPIO 的极性都必须是 `GPIO_ACTIVE_HIGH`（实测踩坑，2026-11-11）**。
+  容易搞错的地方：硬件上 `CT_RST`/`CT_INT` 都是"低有效"（复位拉低、触摸拉低），
+  但 `gpiod_direction_output()` 收的是**逻辑值**，驱动写的复位序列是
+  `output(rst,0)` → 20ms → `output(rst,1)`（释放）。极性写成 `ACTIVE_LOW`
+  会让物理电平整体反相，变成"先高后低"：
+
+```text
+ACTIVE_HIGH : output(rst,0)=物理低(复位) → output(rst,1)=物理高(释放)  ✅
+ACTIVE_LOW  : output(rst,0)=物理高(不复位) → output(rst,1)=物理低(复位) ❌
+```
+
+  实测现象：写成 `ACTIVE_LOW` 时 `dmesg` 出现
+  `Goodix-TS 1-0014: Invalid config (799, 479, 0), using defaults`，
+  驱动把 `touchscreen-size-x/y` 的 800x480 覆盖成 `GOODIX_MAX_*`(4095)，
+  触摸坐标范围错乱；改成 `ACTIVE_HIGH` 后该报错消失。
+  树内 mainline 板子（`imx6q-kp`/`imx6ul-kontron-bl-43`/
+  `imx6ul-ccimx6ulsbcpro`/`sun7i-a20-wexler`）也全部是 `ACTIVE_HIGH`。
+
+> 注意区分两层，别混：
+> - `irq-gpios`/`reset-gpios` 的 `ACTIVE_*` 是 **GPIOD 逻辑极性**，
+>   影响 `gpiod_direction_output()` 的实际电平 → 必须 `ACTIVE_HIGH`；
+> - `interrupts = <9 IRQ_TYPE_EDGE_FALLING>` 是 **中断触发沿**，
+>   INT 空闲被 R18 上拉到高、触摸时芯片拉低 → 下降沿 → 保持 `FALLING`。
+- `AVDD28-supply` / `VDDIO-supply` 是 `goodix.c` 的**强依赖**
+  （`devm_regulator_get()` 非 optional），因此用 `reg_touch_3v3`
+  （`regulator-fixed`、always-on、无控制 GPIO）显式提供，避免依赖
+  regulator core 的 dummy 回退。
+- 内核需开 `CONFIG_INPUT_TOUCHSCREEN=y` + `CONFIG_TOUCHSCREEN_GOODIX=y`
+  （`INPUT`/`INPUT_EVDEV` 原本已开）。
+- `compatible` 只用于匹配驱动，驱动会读芯片 ID 自动选择配置，
+  GT9147/GT1151 都能工作。若上板 `dmesg` 报 `ENXIO`，把 `reg` 改成
+  `<0x5d>`；若屏是 7 寸 FT5x06（地址 0x38），需换成
+  `edt,edt-ft5206` 节点并开 `CONFIG_TOUCHSCREEN_EDT_FT5X06`。
+
+上板验证：
+
+```bash
+i2cdetect -y 1                     # 应看到 0x14（或 0x5d）与 0x3c
+dmesg | grep -i goodix
+# 实测输出（极性修正后，2026-11-11）：
+#   Goodix-TS 1-0014: ID 9147, version: 1040
+#   input: Goodix Capacitive TouchScreen as .../input/input0
+# 不再出现 "Invalid config (799, 479, 0), using defaults"
+cat /proc/bus/input/devices        # 应出现触摸设备
+evtest /dev/input/eventX           # 触摸应上报 ABS_MT_POSITION_X/Y
+
+# 判断是否真的修好，看 ABS_MT_POSITION_X/Y 的 max：
+#   799 / 479  → 正确
+#   4095       → 仍走了 Invalid config 的兜底分支
+```
+
+> OV5640 的 endpoint 用 `bus-type=PARALLEL`，只保留 `bus-width`/`data-shift`
+> 与同步极性；`clock-lanes`/`data-lanes` 是 MIPI CSI-2 属性，并行 DVP 上
+> 属于误用，已删除。
+
+### 6.6.2 USB OTG1_ID 与 USB 刷写（澄清）
+
+底板上 `USB_OTG1_ID`（核心板 B51 = `GPIO_0`）到 Type-C 座之间串了一颗
+`0R/NC` 电阻，丝印标注 **DNP（默认不贴）**，即 ID 引脚在运行时是悬空的。
+这与"USB 能正常刷写程序"**不冲突**，两条路径互不相干：
+
+| 场景 | 谁来初始化 USB | 是否依赖 OTG1_ID |
+|---|---|---|
+| 烧写/刷机 | Boot ROM 的 SDP，BOOT_MODE 进 Serial Downloader | **否**，ROM 强制 OTG1 为 device，不读 ID，也不经过 Linux DTS |
+| Linux 运行时 | `chipidea` + `dr_mode="otg"` | 是，靠 ID 电平切 host/device；ID 悬空 + 内部上拉 → device |
+
+因此 OTG 口可以照常烧写，但**不会自动切到 host**，接 USB 声卡/耳机不会枚举。
+USB 耳机应接 **USB HOST 口（OTG2 = `usb@2184200`，`dr_mode="host"` 固定）**，
+该口不受 ID 影响，插上即识别（内核已开 `SND_USB_AUDIO`）。
+
+若以后确需让 OTG 口做 host：贴那颗 0R 电阻让 ID 接到连接器，或把
+`dr_mode` 改成 `host`（后者会失去 device 模式与 USB 烧写能力，不推荐）。
 
 ### 6.7 最终节点清单（最小设备树）
 
@@ -358,7 +473,7 @@ DTS 直接 `#include "imx6ull.dtsi"`，编译后约 31KiB（精简前 37KiB）�
 | `&uart1` | 调试串口 `ttymxc0` |
 | `&fec2` | RMII，PHY@1 `ethernet-phy-id001c.c816`（RTL8201F），`GPIO5_IO08` 复位 200ms |
 | `&gpmi` | `nand-on-flash-bbt`、`fsl,use-minimum-ecc`、7 个分区 |
-| `&lcdif` | 800x480/31MHz(60Hz)、24bit RGB888、`bits-per-pixel=32`、PWM1 背光(80%)、`GPIO5_IO09` 复位 |
+| `&lcdif` | 800x480/31MHz(60Hz)、24bit RGB888、`bits-per-pixel=32`、PWM1 背光(80%)、无 GPIO 复位 |
 | `&pwm1` | 背光 PWM |
 | `&usdhc1` | TF 卡，4bit，CD=`GPIO1_IO19`，`no-1-8-v` |
 | `&usbotg1` / `&usbotg2` | USB OTG（MiniUSB）/ USB HOST |
@@ -382,8 +497,9 @@ DTS 直接 `#include "imx6ull.dtsi"`，编译后约 31KiB（精简前 37KiB）�
 | `i2c1` / `AP3216C` / `ICM20608` | Mini 板未贴片；ATK 模块走 I2C2 |
 | `&pxp`、GPU/VPU、DRM | 仅控制台/帧缓冲场景不需要 |
 
-> 触摸屏（GT9147/FT5426）使用 I2C2 + `GPIO1_IO09`(INT) / `GPIO1_IO05`(RST)，
-> 本方案未启用；USDHC1 的简化 pinctrl 已释放这两个 GPIO，后续可按需追加。
+> 触摸屏（4.3 寸 GT9xx 系列）使用 I2C2 + `GPIO1_IO09`(CT_INT) /
+> `SNVS_TAMPER9`/`GPIO5_IO09`(CT_RST)，已在 6.6.2 启用。
+> 7 寸屏用 FT5x06（地址 0x38），需换 `edt-ft5x06` 节点与驱动。
 
 ## 7. 内核配置设计
 
@@ -465,10 +581,15 @@ defconfig 从 630 行裁剪到 406 行，只保留 i.MX6ULL 与本板实际外�
   `NETFILTER`/iptables（filter/NAT/mangle）、`NF_TABLES`（nftables + NAT/CT/LOG/LIMIT/REJECT/COMPAT）、
   `IPV6`、`NFS`、`USB_STORAGE`；
 - **新增**：`INPUT_GPIO_BEEPER=y`（蜂鸣器），`LEDS_TRIGGER_HEARTBEAT` 已有。
-- **CMA 修正**：`CONFIG_ARCH_FORCE_MAX_ORDER=10`（imx_v7 原为 13）。13 会令
+- **CMA（2026-11-11 起以设备树为准）**：大小改由板级 DTS 的
+  `reserved-memory/linux,cma` 显式声明（16MiB），defconfig 只保留
+  `CONFIG_CMA=y` + `CONFIG_DMA_CMA=y`，**不显式设**
+  `CONFIG_CMA_SIZE_MBYTES`——DTS 有该节点时 Kconfig 的值会被忽略，
+  避免"两处配置、不知道谁生效"。
+- **`CONFIG_ARCH_FORCE_MAX_ORDER=10`**（imx_v7 原为 13）：13 会令
   `pageblock_nr_pages = 2^13 = 32MiB`，进而 `CMA_MIN_ALIGNMENT_BYTES=32MiB`，
-  导致 `CONFIG_CMA_SIZE_MBYTES=16` 被向上取整为 32MiB（`dmesg` 显示
-  `cma: Reserved 32 MiB`）。降到 10 后 pageblock=4MiB，CMA 恢复 16MiB；
+  CMA 会被向上取整到 32MiB（`dmesg` 显示 `cma: Reserved 32 MiB`）。
+  降到 10 后 pageblock=4MiB，16MiB 的 CMA 才能原样保留；
   i.MX6ULL 无 IPU/VPU/GPU，4MiB 最大连续分配已足够。
 - **虚拟地址布局（2026-11-09）**：`VMSPLIT` 从 `imx_v7_defconfig` 的
   `2G/2G` 改回 `arch/arm/Kconfig` 默认的 `3G/1G`（`VMSPLIT_3G`），
@@ -541,7 +662,18 @@ defconfig 从 630 行裁剪到 406 行，只保留 i.MX6ULL 与本板实际外�
    `mxc_dispdrv`，其 IPU/panel 子驱动全部关闭。
 7. `failed to find ocotp node`：`mach-imx6ul.c` 按 `fsl,imx6ul-ocotp`
    查找，而 6ULL DTS 是 `fsl,imx6ull-ocotp`；在板级 DTS 的 `&ocotp`
-   中补上 `fsl,imx6ul-ocotp` 兼容项，MAC 地址可从 OCOTP 读取。
+   中补上 `fsl,imx6ul-ocotp` 兼容项。
+
+> **MAC 地址（2026-11-11 结论）**：本板 OCOTP 的 MAC 区域（0x88/0x8e）
+> 实测全 0（出厂未烧录 MAC），因此 fec 读到全 0 后被
+> `is_valid_ether_addr()` 判无效，回退到随机 MAC（`2e:ae:dc:...`，本地
+> 管理位）。此外 `imx6ul.dtsi` 的 MAC cell 定义为 6 字节
+> （`reg = <0x8e 6>`），不按 OCOTP 4 字节 word 对齐，nvmem 层打
+> `cell mac-addr raw len 6 unaligned` 警告（非致命，cell 仍创建）。
+> 已在板级 `&ocotp` 把 `fec2_mac_addr` 覆盖为 8 字节消除警告，但
+> **仍拿不到有效 MAC**。要稳定 MAC 需在 `&fec2` 加
+> `local-mac-address = [xx xx xx xx xx xx];`（或 U-Boot `ethaddr`，
+> 或一次性烧录 OCOTP fuse）。
 
 ### 7.5 模块裁剪结果
 
@@ -689,7 +821,7 @@ default-brightness-level = <204>;    /* 255*80% ≈ 80% */
 2. **U-Boot 改用 PWM**（不再用 GPIO 拉高）：
 
 ```text
-include/configs/mx6ullevk.h : + #define CFG_IMX6_PWM_PER_CLK 66000000
+include/configs/mx6ullevk.h : + #define CFG_IMX6_PWM_PER_CLK 24000000
 configs/mx6ull_14x14_evk_nand_defconfig : + CONFIG_PWM_IMX=y（不加 CONFIG_DM_PWM）
 board/freescale/mx6ullevk/mx6ullevk.c :
     lcd_pads 改为 MX6_PAD_GPIO1_IO08__PWM1_OUT
@@ -734,6 +866,159 @@ board/freescale/mx6ullevk/mx6ullevk.c :
 - **`build.sh` 已同步模块支持**：`modules` 命令在 `=m` 为 0 时仍跑一次
   `make modules` 以刷新外部模块编译环境；`info`/编译结果显示模块支持状态；
   `all` 与 `deploy` 流程不变（内核不产出 `.ko`，无需 `modules_install`）。
+
+### 7.8.1 消除 dummy regulator 告警（2026-11-11）
+
+启动日志里出现过三条（外加 `mxsfb` 一条）：
+
+```text
+ov5640 1-003c: supply DOVDD not found, using dummy regulator
+ov5640 1-003c: supply AVDD  not found, using dummy regulator
+ov5640 1-003c: supply DVDD  not found, using dummy regulator
+mxsfb 21c8000.lcdif: supply lcd not found, using dummy regulator
+```
+
+**原因**：这几个驱动都用 `devm_regulator_get()`（非 optional）取 supply，
+设备树没提供时 regulator core 回退到 dummy 并打 warning。功能不受影响
+（dummy 的 enable/disable 都是空操作），但
+`ovti,ov5640.yaml` 里 **AVDD/DVDD 是 required**，按规范应显式声明。
+
+**处理方式**：模组供电都来自底板 `DCDC_3V3` 直连、不可控，所以用
+`regulator-fixed` + `regulator-always-on` 描述：
+
+```dts
+reg_cam_3v3: regulator-cam-3v3 { ... 3.3V, always-on ... };
+reg_lcd_3v3: regulator-lcd-3v3 { ... 3.3V, always-on ... };
+
+ov5640: camera@3c {
+    AVDD-supply  = <&reg_cam_3v3>;
+    DVDD-supply  = <&reg_cam_3v3>;
+    DOVDD-supply = <&reg_cam_3v3>;
+};
+&lcdif { lcd-supply = <&reg_lcd_3v3>; };
+```
+
+三路同源是合理的：OV5640 模组内部自带 LDO，把 3.3V 转成
+AVDD(2.8V)/DVDD(1.5V)/DOVDD(1.8V)，对外只有一个 3.3V 输入
+（mainline 的 `stm32mp157c-ev1` 也是三路同源）。且 `ov5640.c` 只调用
+`regulator_bulk_enable/disable`，**不调用 `regulator_set_voltage`**，
+所以 `regulator-fixed` 足够。
+
+> 顺带打开 `CONFIG_WATCHDOG_SYSFS=y`，否则 `/sys/class/watchdog/watchdog0/`
+> 下只有 `dev`/`uevent`，没有 `identity`/`timeout`/`state` 等属性，
+> 无法从 sysfs 查看看门狗状态（驱动本身正常绑定为 `imx2-wdt`）。
+
+### 7.8.2 设备侧驱动配置核查（2026-11-11，SSH 实测）
+
+**platform 驱动绑定**（全部正常，无 `driver_override`/未绑定）：
+
+| 设备 | 驱动 | 设备 | 驱动 |
+|---|---|---|---|
+| `21c8000.lcdif` | `mxsfb` | `21c4000.csi` | `imx6ul-csi`（`imx7-media-csi.c`，driver.name 已改为 imx6ul-csi） |
+| `21cc000.pxp` | `pxp` | `2080000.pwm` | `pwm-imx27` |
+| `20b4000.ethernet` | `fec` | `2190000.mmc` | `sdhci-esdhc-imx` |
+| `2090000.can` | `flexcan` | `2184000/2184200.usb` | `imx_usb` |
+| `1806000.nand-controller` | `gpmi-nand` | `2284000.rng` | `imx_rngc` |
+| `20bc000.watchdog` | `imx2-wdt` | `21a4000.i2c` | `imx-i2c` |
+| `2020000/21ec000.serial` | `imx-uart` | `20cc000.snvs` | SNVS |
+
+**设备节点**：`video0`=csi capture、`video1`=pxp、
+`v4l-subdev0`=csi、`v4l-subdev1`=ov5640 1-003c；
+`fb0`=800x480/32bpp/stride 3200；背光 `204/255`=80%；
+`can0`/`eth0`(100M)/`lo`；`rtc0`；`mtd0..6` 七个分区与
+`mtdparts=` 完全一致；`ubi0:rootfs` 以 rw 挂载。
+
+**I2C2** (`i2c-1`) 上只有两个设备：`1-0014`=gt9147、`1-003c`=ov5640。
+
+**时钟**（`clk_summary`）：`lcdif_pix`=31MHz、`csi_podf`=24MHz、
+`pwm1 per`=**24MHz**、`perclk`=24MHz。
+
+> **注意（2026-11-11 已修正）**：`CFG_IMX6_PWM_PER_CLK` 正确值是
+> **24000000**，不是 66MHz。PWM1 的 per 时钟源是 `perclk`，父时钟
+> `perclk_sel` 二选一（`CSCMR1[PERCLK_CLK_SEL]`：0=ipg 66MHz / 1=osc 24MHz），
+> **复位默认是 1（osc 24MHz）**，U-Boot 不修改该位，Linux 侧 `clk_summary`
+> 实测 `osc=24MHz → perclk=24MHz → pwm1=24MHz` 印证。写成 66MHz 会让
+> U-Boot 阶段 PWM 频率算成约 73Hz（占空比 80% 不变、亮度看着对，但频率低）。
+
+**输入设备编号会变**（2026-11-11 实测）：
+
+```text
+event0 = 20cc000.snvs:snvs-powerkey   ← 启用 snvs_pwrkey 后出现
+event1 = Goodix Capacitive TouchScreen
+event2 = beep
+event3 = gpio-keys (KEY0)
+```
+
+> **应用层不要硬编码 `/dev/input/event0`**：启用 ON_OFF 按键后它变成了
+> pwrkey，触摸是 event1。应按 `EVIOCGNAME` 按名字查找，或用 udev 固定
+> symlink。触摸 ABS 范围实测 `ABS_X/ABS_MT_POSITION_X max=799`、
+> `ABS_Y/ABS_MT_POSITION_Y max=479`，正确（非 4095 兜底）。
+
+**GPIO 占用**（`debugfs/gpio`，全部与原理图一致）：
+
+```text
+GPIO1: 2=OV5640 reset, 3=sys-led, 4=OV5640 powerdown,
+       9=触摸 irq, 18=KEY0, 19=TF 卡 cd
+GPIO5: 1=beep, 8=phy-reset, 9=触摸 reset
+```
+
+**dmesg 残余告警**（均已确认无害）：`gpiochipX: Static allocation of
+GPIO base is deprecated`（i.MX pinctrl 固有）、`Console: colour dummy
+device`（正常）、`No soundcards found`（未插 USB 声卡）、
+`Fixed dependency cycle(s)`（fw_devlink 自动解环）。
+`dummy regulator` 四条已由 7.8.1 修复。
+
+### 7.9 RTC 与 ON_OFF 按键（2026-11-11 实测）
+
+**硬件**：i.MX6ULL 片内 SNVS RTC（`fsl,sec-v4.0-mon-rtc-lp`），
+核心板上由 **CR1220 纽扣电池**经 `BAT54C` 双电源切换供电：
+
+```text
+外部电源正常时  VDD_SNVS_3V3 供电，CR1220 不放电
+外部电源断开时  VDD_COIN_3V → BAT54C → VDD_SNVS_IN，CR1220 顶上来
+```
+
+因此 SNVS 域（含 RTC 计数器）始终有电，断电后走时不受影响。
+
+**内核配置**（均已开启）：
+
+```text
+CONFIG_RTC_CLASS=y
+CONFIG_RTC_DRV_SNVS=y
+CONFIG_RTC_HCTOSYS=y                      开机 rtc0 → 系统时钟
+CONFIG_RTC_HCTOSYS_DEVICE="rtc0"
+CONFIG_RTC_SYSTOHC=y                      关机 系统时钟 → rtc0
+```
+
+**实测保时能力**（2026-11-11）：
+
+```text
+设置   date -u -s "2026-11-11 01:30:00"  &&  hwclock -w -u
+RTC 读回  Wed Nov 11 01:30:00 2026
+reboot
+重启后    Wed Nov 11 01:30:53 2026      uptime 45.68s
+差值 53s = reboot 排队 2s + 启动到应用 45.7s  → 分秒不差，电池正常
+```
+
+> **注意：新板首次使用或换电池后，必须手动设一次时间**，否则 RTC 从
+> 1970-01-01 开始累计，`dmesg` 会看到
+> `setting system clock to 1970-01-01T...`。这不是故障。
+> 联网后可直接 `ntpd -q` / `chronyc makestep` 校时，再 `hwclock -w`
+> 写回 RTC 即可长期保持。
+
+**ON_OFF 按键**：核心板连接器 B4 = `ON_OFF`（SNVS 域 PWRON 引脚），
+接底板 K1 按键。已在 DTS 启用：
+
+```dts
+&snvs_pwrkey { status = "okay"; };
+```
+
+作用：短按唤醒/开机，长按触发 SNVS power down。
+`ON_OFF` 是 SoC 专用引脚，不需要 pinctrl。
+
+> 未启用 `&snvs_poweroff`：它通过拉低 `PMIC_ON_REQ` 通知 PMIC 断电，
+> 而本板是分立 DCDC、无 PMIC，启用后 `poweroff` 只会 halt 不会真正断电，
+> 容易误解，故保持关闭。
 
 ### 7.6 内建配置评估
 
@@ -787,7 +1072,10 @@ board/freescale/mx6ullevk/mx6ullevk.c :
   完整兜底 `CONFIG_CMDLINE`，有 U-Boot bootargs 就用它，没有就用兜底。
   不使用 `CMDLINE_EXTEND`：那会让 bootargs 为空时内核只剩光标参数、
   缺 `root=`/`mtdparts=` 而无法启动。
-- `CONFIG_ARCH_FORCE_MAX_ORDER=10` 保证 CMA 是 16MiB，全屏 logo 能分配成功。
+- `CONFIG_ARCH_FORCE_MAX_ORDER=10` + DTS 的 `linux,cma { size = <0x1000000>; }`
+  共同保证 CMA 是 16MiB，全屏 logo 能分配成功。
+- CMA 实测不是帧率瓶颈：摄像头预览时 `CmaFree` 长期有 13MiB+ 剩余，
+  瓶颈是 CPU memcpy（见 7.8 节）。
 
 > 注意：改动 `global_cursor_default` 是内核通用代码，属板级定制；
 > 升级内核版本时需重新应用。
@@ -922,7 +1210,7 @@ dtb 反编译确认（独立最小设备树）：
 memory@80000000: reg = <0x80000000 0x10000000>
 fec2:            status = "okay"
 ethernet-phy@1:  compatible = "ethernet-phy-id001c.c816"
-lcdif:           enable-gpio = <&gpio5 9 GPIO_ACTIVE_HIGH>
+lcdif:           display = <&display0>;  (无 enable-gpio)
 gpmi:            status = "okay"
 分区:            boot/env/logo/kernel/dtb/tee/rootfs
 rootfs:          reg = <0x4800000 0x1b800000>  (440MiB)
@@ -1004,9 +1292,10 @@ rootfs 镜像命名与 U-Boot 的 `rootfs_file` 保持一致：`rootfs_nand.ubi`
    换用其它 PHY 时改 compatible 或回到 C22 自动探测即可。
 6. **`all` 会执行 `distclean`（`make mrproper`）**：自定义 `menuconfig` 配置请先执行 `./build.sh savedefconfig`，日常使用 `./build.sh build` 增量编译；`all` 结束会自动 `deploy` 到 `output/` 与 `$HOME/tftp`。
 7. **DTB 命名**：内核 dtb 使用下划线 `imx6ull-14x14-evk_nand.dtb`，与 U-Boot 的 `dtb_file` 严格一致；U-Boot 自身内建 dtb 为 `imx6ull-14x14-evk-nand.dtb`（连字符，用于 U-Boot 驱动）。
-8. **未启用外设**：最小 DTS 只保留启动/显示/网络/NAND/TF/USB/LED/BEEP。CAN、RS485、
-   触摸屏、SDIO WiFi、摄像头、音频均未启用；需要时按 6.7 的引脚说明追加节点，
-   并同步打开对应内核配置（如 `CONFIG_CAN`、`CONFIG_TOUCHSCREEN_GOODIX`、
+8. **未启用外设**：早期最小 DTS 只保留启动/显示/网络/NAND/TF/USB/LED/BEEP，
+   后续已陆续启用 CAN/UART3、摄像头（CSI+OV5640+PXP）、触摸（GT9xx）、USB 声卡。
+   仍未启用：SDIO WiFi、QSPI、USDHC2、AP3216C/ICM20608、板载音频 codec；
+   需要时按 6.7 的引脚说明追加节点，并同步打开对应内核配置（如 `CONFIG_CAN`、
    `CONFIG_CFG80211`/`CONFIG_WLAN`、`CONFIG_MEDIA_SUPPORT`、`CONFIG_SND`）。
 9. **OP-TEE**：本方案关闭 `CONFIG_OPTEE`/`CONFIG_TEE`（`tee` 分区保留给 U-Boot）。
    若后续要在 Linux 下使用 OP-TEE，需要重新打开并保留 `busfreq_optee.o` 所需的
@@ -1041,7 +1330,7 @@ rootfs 镜像命名与 U-Boot 的 `rootfs_file` 保持一致：`rootfs_nand.ubi`
 | 1 路 CAN，TJA1050 | 已启用（CAN1 / FLEXCAN1） |
 | 1 路 485，SP3485 | 已启用（UART3，与 RS232 跳线选择） |
 | 1 个 ATK 模块接口（蓝牙/GPS/MPU6050/手势等） | 控制器已启用（I2C2 + UART3），模块节点按需添加 |
-| 1 个摄像头模块接口（板上无传感器） | 未启用 CSI（接 OV5640 时再打开 MEDIA_SUPPORT） |
+| 1 个摄像头模块接口（P1, Header 9X2） | 已启用（CSI + OV5640 + PXP，接模块即可用） |
 | 1 个 USB 串口（调试） | 已启用（UART1） |
 | 1 个 USB HOST 接口 | 已启用（OTG2，`dr_mode=host`） |
 | 1 个 USB OTG 接口（MiniUSB，USB_OTG） | 已启用（OTG1，`dr_mode=otg` + USB Gadget/ConfigFS） |
@@ -1053,17 +1342,19 @@ rootfs 镜像命名与 U-Boot 的 `rootfs_file` 保持一致：`rootfs_nand.ubi`
 | 1 组 3.3V 电源供应/接入口 | 供电，无驱动 |
 | 1 个 DC 电源输入（6~18V） | 供电，无驱动 |
 | 1 个启动模式选择配置接口 | 硬件/U-Boot |
-| 1 个 RTC 后备电池座（带电池） | SNVS RTC |
+| 1 个 RTC 后备电池座（CR1220，带电池） | SNVS RTC，已启用并实测保时（见 7.9） |
 | 1 个复位按钮（复位 MPU 和 LCD） | 硬件 |
-| 1 个 ON/OFF 按钮 | 硬件 |
+| 1 个 ON/OFF 按钮（核心板 B4 = ON_OFF） | 已启用（`snvs_pwrkey`，短按唤醒/长按下电） |
 | 1 个功能按钮 | 已启用（gpio-keys KEY0，GPIO1_IO18） |
 | 1 个电源开关 | 硬件 |
 | 1 个 SDIO WIFI 接口 | 未启用（与 NAND 引脚复用） |
 | 1 个 10P JTAG 接口（JLINK 等） | 调试用，无内核节点 |
 
-> 官方底板资源列表没有单列 LCD 接口；实机 U-Boot 输出 `840 x 480`，本方案仍按
-> RGB LCD 存在配置（PWM1 背光、GPIO5_IO09 复位）。触摸屏为 LCD 模块选配，
-> 使用 I2C2，INT=GPIO1_IO09，RST=GPIO1_IO05，当前未启用。
+> 官方底板资源列表没有单列 LCD 接口；按屏幕手册与底板原理图，LCD 为
+> 800x480@60Hz，PWM1 背光（BLT_PWM = GPIO1_IO08），RESET 接整板复位网络。
+> 早期 U-Boot 输出 `840 x 480` 是配置错误，已修正（见 6.2 节）。
+> 触摸屏已启用（4.3 寸 GT9xx），使用 I2C2，CT_RST=SNVS_TAMPER9、
+> CT_INT=GPIO1_IO09；屏电源取底板 DCDC_3V3，用 always-on fixed regulator 描述。
 
 ### 12.3 与 ALPHA 底板的主要差异
 

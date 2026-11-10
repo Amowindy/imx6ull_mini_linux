@@ -1850,8 +1850,6 @@ static int pxp_probe(struct platform_device *pdev)
 
 	video_set_drvdata(vfd, dev);
 	snprintf(vfd->name, sizeof(vfd->name), "%s", pxp_videodev.name);
-	v4l2_info(&dev->v4l2_dev,
-			"Device registered as /dev/video%d\n", vfd->num);
 
 	platform_set_drvdata(pdev, dev);
 
@@ -1867,6 +1865,16 @@ static int pxp_probe(struct platform_device *pdev)
 		v4l2_err(&dev->v4l2_dev, "Failed to register video device\n");
 		goto err_m2m;
 	}
+
+	/*
+	 * 必须用 video_device_node_name() 在注册之后打印。
+	 * 原来这行写在 video_register_device() 之前，取的是模板里的
+	 * vfd->num（恒为 0），会和 CSI 的 /dev/video0 打印重复，造成
+	 * "两个设备都叫 video0" 的假象；实际 PXP 会因为 minor 0 已被
+	 * CSI 占用而拿到 video1。
+	 */
+	v4l2_info(&dev->v4l2_dev, "Device registered as /dev/%s\n",
+		  video_device_node_name(vfd));
 
 #ifdef CONFIG_MEDIA_CONTROLLER
 	dev->mdev.dev = &pdev->dev;

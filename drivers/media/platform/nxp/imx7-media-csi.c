@@ -2299,7 +2299,14 @@ static struct platform_driver imx7_csi_driver = {
 	.remove_new = imx7_csi_remove,
 	.driver = {
 		.of_match_table = imx7_csi_of_match,
-		.name = "imx7-csi",
+		/*
+		 * 本板是 i.MX6ULL，其 CSI 外设与 i.MX7 是同一 IP，共用本驱动。
+		 * 驱动名（driver.name）会出现在 dmesg 前缀与
+		 * /sys/bus/platform/drivers/ 下，改成 imx6ul-csi 更如实。
+		 * of_match_table 里的 "fsl,imx7-csi" / "fsl,imx8mq-csi" 仍保留，
+		 * 不影响对 6UL/7/8MQ 的 compatible 匹配。
+		 */
+		.name = "imx6ul-csi",
 	},
 };
 module_platform_driver(imx7_csi_driver);
@@ -2307,4 +2314,4 @@ module_platform_driver(imx7_csi_driver);
 MODULE_DESCRIPTION("i.MX7 CSI subdev driver");
 MODULE_AUTHOR("Rui Miguel Silva <rui.silva@linaro.org>");
 MODULE_LICENSE("GPL v2");
-MODULE_ALIAS("platform:imx7-csi");
+MODULE_ALIAS("platform:imx6ul-csi");

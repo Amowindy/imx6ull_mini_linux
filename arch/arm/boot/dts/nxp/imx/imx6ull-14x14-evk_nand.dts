@@ -2,21 +2,38 @@
 //
 // i.MX6ULL Mini (NAND) 板级设备树
 //
+// 依据 IMX6ULL_MINI_V2.2(Mini底板原理图).pdf 核对（2026-11-10）。
 // 不再继承 NXP EVK 的 imx6ul-14x14-evk.dtsi，只描述本板实际存在的硬件：
-//   - DDR3L 256MiB
-//   - 4.3 寸 RGB888 LCD（31MHz 像素时钟，840x480 时序，约 57.8Hz），
-//     PWM1 背光（GPIO1_IO08），GPIO5_IO09(SNVS_TAMPER9) 复位
-//   - 单网口 ENET2，RTL8201F PHY（MDIO 地址 1，GPIO5_IO08 复位）
-//   - GPMI NAND 512MiB，分区与 U-Boot 的 NAND_PARTITION_LAYOUT 一致
-//   - TF 卡（USDHC1，CD = GPIO1_IO19）
-//   - USB OTG（OTG1，MiniUSB）+ USB HOST（OTG2）+ USB 串口（调试）
-//   - 红色状态 LED（GPIO1_IO03，低有效）、有源蜂鸣器（GPIO5_IO01）
 //
-// 已启用（2026-11-10）：OV5640 摄像头（CSI 并行 DVP，见文件中部节点）、
-//   PXP 硬件色彩转换/缩放。
+//   - DDR3L 256MiB（U-Boot 启动日志 DRAM: 256 MiB），起始 0x80000000
+//   - 4.3 寸 RGB888 LCD，800x480@60Hz / 31MHz 像素时钟（ATK4384，屏 ID 0x04）
+//       LCD 40pin 接口 J10：
+//         pin40 RESET   整板复位网络（核心板 A40，与 MCU 共用复位按键）
+//         pin39 CT_INT  触摸中断，10K 上拉 → GPIO1_IO09（核心板 B15）
+//         pin38/36      I2C2_SCL / I2C2_SDA（核心板 B31/B32 = UART5_TXD/RXD）
+//         pin35 CT_RST  触摸复位，10K 上拉 → SNVS_TAMPER9 = GPIO5_IO09（A48）
+//         pin34 BLT_PWM 背光 → GPIO1_IO08（核心板 B16 / PWM1_OUT）
+//         LCD 电源由底板 DCDC_3V3 直接提供（不可控，用 fixed regulator 描述）
+//   - 电容触摸屏（GT9xx 系列，挂在 I2C2，与摄像头共用总线）
+//   - 单网口 ENET2，RTL8201F PHY（MDIO 地址 1，SNVS_TAMPER8 / GPIO5_IO08 复位）
+//   - GPMI NAND 512MiB，分区与 U-Boot 的 NAND_PARTITION_LAYOUT 一致
+//   - TF 卡（USDHC1，CD = UART1_RTS_B / GPIO1_IO19）
+//   - USB OTG（OTG1，Type-C，兼 USB 转串口 CH340）+ USB HOST（OTG2）
+//   - CAN1（UART3_RTS_B/CTS_B 复用）、UART3（RS232/RS485/GPS 跳线选择）
+//   - 红色状态 LED（GPIO1_IO03，低有效）、有源蜂鸣器（SNVS_TAMPER1 / GPIO5_IO01）、
+//     KEY0（UART1_CTS_B / GPIO1_IO18，低有效）
+//   - OV5640 摄像头（CSI 并行 DVP 8-bit，P1 18pin 接口，I2C2 地址 0x3C）
+//   - PXP 硬件色彩转换/缩放
+//   - ON_OFF 按键（核心板 B4，snvs_pwrkey，短按唤醒/长按下电）
+//   - SNVS RTC + CR1220 后备电池（核心板 BAT54C 双电源切换，断电保时）
+//   - CMA 16MiB（本文件 reserved-memory/linux,cma 声明，见下方注释）
+//
 // 明确不包含（本板没有或暂未启用）：
-//   WM8960 音频（板载无 codec，音频改走 USB 声卡）、AP3216C/ICM20608、
-//   SDIO WiFi、QSPI、USDHC2、74HC595 GPIO 扩展、触摸屏。
+//   WM8960 音频（板载无 codec，音频走 USB 声卡，接 USB HOST 口）、
+//   AP3216C/ICM20608、SDIO WiFi、QSPI、USDHC2、74HC595 GPIO 扩展、
+//   电阻触摸屏（SP_TX 相关 R65/R66 为 DNP）、
+//   I2C1/UART2（仅在排针引出，无板载器件，保持 disabled）、
+//   snvs_poweroff（本板为分立 DCDC、无 PMIC，启用只会 halt 不会断电）。
 //
 // 生成的 dtb 名为 imx6ull-14x14-evk_nand.dtb，与 U-Boot 的
 // dtb_file / tftp_update 下载文件名一致。
@@ -24,6 +41,7 @@
 /dts-v1/;
 
 #include <dt-bindings/input/linux-event-codes.h>
+#include <dt-bindings/interrupt-controller/irq.h>
 #include <dt-bindings/media/video-interfaces.h>
 #include "imx6ull.dtsi"
 
@@ -45,6 +63,80 @@
 	memory@80000000 {
 		device_type = "memory";
 		reg = <0x80000000 0x10000000>;	/* 256MiB */
+	};
+
+	/*
+	 * CMA（连续内存分配器）：摄像头 CSI / PXP / 显示用的 DMA 缓冲都从这里
+	 * 分配，因为这几路外设没有 IOMMU，必须物理连续内存。
+	 *
+	 * 这里显式声明 16MiB，**CMA 大小以设备树为准**（DTS 有本节点时，
+	 * 内核配置 CONFIG_CMA_SIZE_MBYTES 的值被忽略），因此 defconfig 里
+	 * 不再显式写 CMA_SIZE_MBYTES，避免"两处配置、不知道谁生效"。
+	 *
+	 * 16MiB 实测够用：CmaFree 长期有 13MiB 以上剩余，够 640x480 UYVY
+	 * （600KiB/帧）与 800x480 XR24（1.5MiB/帧）各自多缓冲；
+	 * 也够后续 V4L2_MEMORY_DMABUF 零拷贝共享缓冲。
+	 * 注意 256MiB 内存下 16MiB 占 6.25%，是合理比例。
+	 *
+	 * 实测 CMA **不是**帧率瓶颈（瓶颈是 CPU memcpy，见文档 7.8 节），
+	 * 加大 CMA 不会提升帧率。
+	 */
+	reserved-memory {
+		#address-cells = <1>;
+		#size-cells = <1>;
+		ranges;
+
+		linux,cma {
+			compatible = "shared-dma-pool";
+			reusable;
+			size = <0x1000000>;	/* 16MiB */
+			linux,cma-default;
+		};
+	};
+
+	/*
+	 * 触摸/屏模组的 3.3V 供电：底板 DCDC_3V3 直连，没有可控 GPIO，
+	 * 因此用 always-on fixed regulator 描述，供 goodix 的
+	 * AVDD28 / VDDIO 引用（驱动对这两个 supply 是强依赖）。
+	 */
+	reg_touch_3v3: regulator-touch-3v3 {
+		compatible = "regulator-fixed";
+		regulator-name = "touch-3v3";
+		regulator-min-microvolt = <3300000>;
+		regulator-max-microvolt = <3300000>;
+		regulator-always-on;
+		regulator-boot-on;
+	};
+
+	/*
+	 * 摄像头模块（P1）供电：底板 DCDC_3V3 直连，不可控。
+	 * OV5640 模组内部自带 LDO，把 3.3V 转成 AVDD(2.8V)/DVDD(1.5V)/
+	 * DOVDD(1.8V)，所以对外只有一个 3.3V 输入，三路 supply 指向同一个
+	 * 电源域即可（mainline 的 stm32mp157c-ev1 也是三路同源）。
+	 *
+	 * ov5640.c 只用 regulator_bulk_enable/disable，不调用
+	 * regulator_set_voltage，所以 regulator-fixed 足够。
+	 * 不写这三路 supply 时驱动会拿到 dummy regulator 并打印
+	 * "supply AVDD not found, using dummy regulator" 警告，功能不受影响，
+	 * 但 AVDD/DVDD 在 binding 里是 required，按规范应显式提供。
+	 */
+	reg_cam_3v3: regulator-cam-3v3 {
+		compatible = "regulator-fixed";
+		regulator-name = "cam-3v3";
+		regulator-min-microvolt = <3300000>;
+		regulator-max-microvolt = <3300000>;
+		regulator-always-on;
+		regulator-boot-on;
+	};
+
+	/* LCD 模组供电：底板 DCDC_3V3 直连（40pin 接口 pin1/2），不可控 */
+	reg_lcd_3v3: regulator-lcd-3v3 {
+		compatible = "regulator-fixed";
+		regulator-name = "lcd-3v3";
+		regulator-min-microvolt = <3300000>;
+		regulator-max-microvolt = <3300000>;
+		regulator-always-on;
+		regulator-boot-on;
 	};
 
 	/*
@@ -109,6 +201,22 @@
  */
 &ocotp {
 	compatible = "fsl,imx6ull-ocotp", "fsl,imx6ul-ocotp", "syscon";
+
+	/*
+	 * imx6ul.dtsi 里 MAC cell 定义成 6 字节（reg = <0x8e 6>），不按
+	 * OCOTP 的 4 字节 word 对齐，nvmem 层在 cell 创建时会打
+	 * "cell mac-addr raw len 6 unaligned to nvmem word size 4"。
+	 * 这里覆盖为 8 字节（读满两个 word），fec 驱动用
+	 * of_get_mac_address() 只取前 6 字节（ETH_ALEN），语义不变。
+	 *
+	 * 注意：本板 OCOTP 的 MAC 区域（0x88/0x8e）实测全 0（出厂未烧录
+	 * MAC），因此对齐后 fec 读到的仍是全 0，is_valid_ether_addr() 判
+	 * 无效仍会回退到随机 MAC。若要稳定 MAC，另在 &fec2 加
+	 * local-mac-address = [xx xx xx xx xx xx];（见下文注释）。
+	 */
+	fec2_mac_addr: mac-addr@8e {
+		reg = <0x8e 8>;
+	};
 };
 
 /*
@@ -145,25 +253,74 @@
 	status = "okay";
 };
 
-/* ATK 模块接口（MPU6050/手势等）与摄像头模块共用 I2C2 */
+/*
+ * I2C2（核心板 B31/B32 = UART5_TXD/RXD，底板 R40/R41 4.7K 上拉）。
+ * 总线上挂两个设备：4.3 寸 LCD 的电容触摸 IC、P1 摄像头接口的 OV5640。
+ * 两者地址不冲突（触摸 0x14/0x5D，摄像头 0x3C）。
+ */
 &i2c2 {
 	clock-frequency = <100000>;
 	pinctrl-names = "default";
 	pinctrl-0 = <&pinctrl_i2c2>;
 	status = "okay";
-};
 
-/*
- * 摄像头模块接口（OV5640，并行 DVP 8-bit）：
- *   - I2C 控制：I2C2，地址 0x3C
- *   - 数据：CSI 并行总线，PIXCLK/HSYNC/VSYNC + DATA00..07
- *   - 主时钟：CSI_MCLK = 24MHz（由 CSI 时钟树提供）
- *   - PWDN = GPIO1_IO04（高有效），RESET = GPIO1_IO02（低有效）
- * 若实际板子的 PWDN/RESET 引脚与此不同，改 pinctrl_csi_pwr 与
- * ov5640 节点的 powerdown-gpios/reset-gpios 即可。
- * SDIO WiFi 使用 USDHC2，与 NAND 引脚复用，NAND 启动时不可用。
- */
-&i2c2 {
+	/*
+	 * 4.3 寸 800x480 电容触摸屏（正点原子屏 ID 0x04，GT9xx 系列）：
+	 *   LCD 接口 pin39 CT_INT → GPIO1_IO09，10K 上拉，低有效
+	 *   LCD 接口 pin35 CT_RST → SNVS_TAMPER9 / GPIO5_IO09，10K 上拉
+	 *   LCD 接口 pin38/36    → I2C2_SCL / I2C2_SDA
+	 *   电源                 → 底板 DCDC_3V3（always-on）
+	 *
+	 * 实机 probe 日志：Goodix-TS 1-0014: ID 9147, version: 1040
+	 *   → 触控 IC 确认为 GT9147，I2C 地址 0x14，与下面声明一致。
+	 *
+	 * mainline goodix 驱动在 probe 时会按本节点的 reg 主动把芯片
+	 * 配置成该地址（复位时序中拉高/拉低 INT 选择 0x14 或 0x5D），
+	 * 因此这里写 0x14 即可；若 probe 报 ENXIO 再改 <0x5d>。
+	 *
+	 * 注意：早期把 irq-gpios/reset-gpios 写成 ACTIVE_LOW 时，复位序列
+	 * 物理电平整体反相，芯片没被正确初始化，config 区读回全 0，
+	 * 驱动打印 "Invalid config (799, 479, 0), using defaults" 并把
+	 * 下面的 800x480 覆盖成 4096x4096。改成 ACTIVE_HIGH 后 config
+	 * 读取正常、告警消失，实测 ABS X/Y = 799/479。驱动未做任何修改。
+	 */
+	gt9xx: touchscreen@14 {
+		compatible = "goodix,gt9147";
+		reg = <0x14>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&pinctrl_tsc_int &pinctrl_tsc_reset>;
+		interrupt-parent = <&gpio1>;
+		interrupts = <9 IRQ_TYPE_EDGE_FALLING>;
+		/*
+		 * 极性必须 ACTIVE_HIGH：goodix.c 用的是 gpiod_direction_output()
+		 * 的逻辑值，复位序列为 output(rst,0) → 20ms → 选地址 →
+		 * output(rst,1)。ACTIVE_HIGH 时逻辑 0 = 物理低（复位）、逻辑 1
+		 * = 物理高（释放），与 CT_RST 低有效一致；写成 ACTIVE_LOW 会
+		 * 整体反相（先高后低），芯片可能停在复位态或地址选择错误。
+		 * 同理地址选择 output(int, addr==0x14) 传逻辑 1，需为物理高，
+		 * 即"复位释放后 5ms 内 INT 高 → I2C 地址 0x14"。
+		 * 树内 imx6q-kp / imx6ul-kontron-bl-43 / sun7i-a20-wexler 等
+		 * mainline 板子也都是 GPIO_ACTIVE_HIGH。
+		 */
+		irq-gpios = <&gpio1 9 GPIO_ACTIVE_HIGH>;
+		reset-gpios = <&gpio5 9 GPIO_ACTIVE_HIGH>;
+		AVDD28-supply = <&reg_touch_3v3>;
+		VDDIO-supply = <&reg_touch_3v3>;
+		touchscreen-size-x = <800>;
+		touchscreen-size-y = <480>;
+		status = "okay";
+	};
+
+	/*
+	 * 摄像头模块接口（OV5640，并行 DVP 8-bit，P1 = Header 9X2）：
+	 *   - I2C 控制：I2C2，地址 0x3C
+	 *   - 数据：CSI 并行总线，PIXCLK/HSYNC/VSYNC + D0..D7
+	 *   - 主时钟：CSI_MCLK（经 R32 22R 串阻，由 CSI 时钟树提供）
+	 *   - PWDN = GPIO1_IO04（核心板 B14 / GPIO_4），高有效
+	 *   - RESET = GPIO1_IO02（核心板 B13 / GPIO_2），低有效
+	 * 注意：clock-lanes / data-lanes 是 MIPI CSI-2 属性，并行 DVP
+	 * 只需要 bus-width + data-shift（D0..D7 接 CSI_DATA02..09）。
+	 */
 	ov5640: camera@3c {
 		compatible = "ovti,ov5640";
 		reg = <0x3c>;
@@ -173,6 +330,11 @@
 		clock-names = "xclk";
 		powerdown-gpios = <&gpio1 4 GPIO_ACTIVE_HIGH>;
 		reset-gpios = <&gpio1 2 GPIO_ACTIVE_LOW>;
+		/* 模组由底板 DCDC_3V3 供电，内部 LDO 再产生 2.8V/1.5V/1.8V，
+		 * 三路 supply 同源（不写会拿到 dummy regulator 并打印警告） */
+		AVDD-supply = <&reg_cam_3v3>;
+		DVDD-supply = <&reg_cam_3v3>;
+		DOVDD-supply = <&reg_cam_3v3>;
 		status = "okay";
 
 		port {
@@ -181,8 +343,6 @@
 				bus-type = <MEDIA_BUS_TYPE_PARALLEL>;
 				bus-width = <8>;
 				data-shift = <2>;
-				clock-lanes = <0>;
-				data-lanes = <1 2>;
 				pclk-sample = <1>;
 				hsync-active = <0>;
 				vsync-active = <0>;
@@ -298,15 +458,26 @@
 	};
 };
 
-/* 7 寸 RGB LCD：时序与 U-Boot 实机 840x480 输出一致 */
+/*
+ * 4.3 寸 RGB LCD（800x480@60Hz，31MHz），时序与 U-Boot 一致。
+ * LCD 的 RESET 是 LCD 接口 pin40 的 RESET 网络（核心板 A40，与整板复位
+ * 按键/MCU 共用），不由任何 GPIO 控制，因此这里没有 enable-gpio。
+ * LCD 接口 pin35/pin39 的 CT_RST / CT_INT 属于电容触摸屏，
+ * 已在 &i2c2 的 gt9xx 节点与 pinctrl_tsc_* 中配置。
+ */
 &lcdif {
 	assigned-clocks = <&clks IMX6UL_CLK_LCDIF_PRE_SEL>;
 	assigned-clock-parents = <&clks IMX6UL_CLK_PLL5_VIDEO_DIV>;
 	pinctrl-names = "default";
-	pinctrl-0 = <&pinctrl_lcdif_dat &pinctrl_lcdif_ctrl
-		     &pinctrl_lcdif_reset>;
+	pinctrl-0 = <&pinctrl_lcdif_dat &pinctrl_lcdif_ctrl>;
 	display = <&display0>;
-	enable-gpio = <&gpio5 9 GPIO_ACTIVE_HIGH>;	/* LCD 复位，与 U-Boot 一致 */
+	/*
+	 * LCD 模组由底板 DCDC_3V3 直连（40pin 接口 pin1/2），不可控。
+	 * mxsfb 用 devm_regulator_get(dev, "lcd") 取该 supply，缺失时
+	 * regulator core 会打印 "supply lcd not found, using dummy
+	 * regulator"；显式给出可消除警告，语义也更准确。
+	 */
+	lcd-supply = <&reg_lcd_3v3>;
 	status = "okay";
 
 	display0: display@0 {
@@ -381,6 +552,22 @@
 	fsl,tx-d-cal = <106>;
 };
 
+/* USB HOST 口走 OTG2，对应 usbphy2，阻抗校准与 usbphy1 保持一致 */
+&usbphy2 {
+	fsl,tx-d-cal = <106>;
+};
+
+/*
+ * ON_OFF 按键（底板原理图核心板连接器 B4 = ON_OFF）。
+ * i.MX6ULL 的 SNVS 域 PWRON 引脚，接在底板 K1 按键上：
+ *   短按 → 唤醒/开机；长按 → 触发 SNVS power down。
+ * 该功能由 snvs_pwrkey 驱动提供，dtsi 里默认 disabled，这里按原理图启用。
+ * ON_OFF 是 SoC 专用引脚，不需要 pinctrl。
+ */
+&snvs_pwrkey {
+	status = "okay";
+};
+
 &wdog1 {
 	pinctrl-names = "default";
 	pinctrl-0 = <&pinctrl_wdog>;
@@ -413,6 +600,13 @@
 		fsl,pins = <
 			MX6UL_PAD_UART5_TX_DATA__I2C2_SCL	0x4001b8b0
 			MX6UL_PAD_UART5_RX_DATA__I2C2_SDA	0x4001b8b0
+		>;
+	};
+
+	/* 触摸中断 CT_INT：LCD 接口 pin39 → GPIO1_IO09（底板 R18 10K 上拉） */
+	pinctrl_tsc_int: tscintgrp {
+		fsl,pins = <
+			MX6UL_PAD_GPIO1_IO09__GPIO1_IO09	0x10b0
 		>;
 	};
 
@@ -559,12 +753,18 @@
 };
 
 &iomuxc_snvs {
-	pinctrl_lcdif_reset: lcdifresetgrp {
+	/*
+	 * 触摸复位 CT_RST：LCD 接口 pin35 → SNVS_TAMPER9 / GPIO5_IO09
+	 * （底板 R19 10K 上拉）。注意该 pad 属于 iomuxc_snvs 域，
+	 * 不能和 GPIO1_IO09 放在同一个 iomuxc 组里。
+	 */
+	pinctrl_tsc_reset: tscresetgrp {
 		fsl,pins = <
-			MX6ULL_PAD_SNVS_TAMPER9__GPIO5_IO09	0x79
+			MX6ULL_PAD_SNVS_TAMPER9__GPIO5_IO09	0x10b0
 		>;
 	};
 
+	/* ENET2 PHY 复位：SNVS_TAMPER8 / GPIO5_IO08，低有效 */
 	pinctrl_enet2_reset: enet2resetgrp {
 		fsl,pins = <
 			MX6ULL_PAD_SNVS_TAMPER8__GPIO5_IO08	0x10b0
