@@ -11,8 +11,10 @@
 //   - USB OTG（OTG1，MiniUSB）+ USB HOST（OTG2）+ USB 串口（调试）
 //   - 红色状态 LED（GPIO1_IO03，低有效）、有源蜂鸣器（GPIO5_IO01）
 //
+// 已启用（2026-11-10）：OV5640 摄像头（CSI 并行 DVP，见文件中部节点）、
+//   PXP 硬件色彩转换/缩放。
 // 明确不包含（本板没有或暂未启用）：
-//   WM8960 音频、OV5640 摄像头、AP3216C/ICM20608、CAN、RS485、
+//   WM8960 音频（板载无 codec，音频改走 USB 声卡）、AP3216C/ICM20608、
 //   SDIO WiFi、QSPI、USDHC2、74HC595 GPIO 扩展、触摸屏。
 //
 // 生成的 dtb 名为 imx6ull-14x14-evk_nand.dtb，与 U-Boot 的
@@ -21,6 +23,7 @@
 /dts-v1/;
 
 #include <dt-bindings/input/linux-event-codes.h>
+#include <dt-bindings/media/video-interfaces.h>
 #include "imx6ull.dtsi"
 
 #define NAND_ROOTFS_SIZE 0x1b800000	/* 440MiB = 512MiB - 72MiB 前置分区 */
@@ -138,10 +141,70 @@
 };
 
 /*
- * 摄像头模块接口：底板无传感器，CSI 保持 SoC 默认 disabled；
- * 接 OV5640 时再启用 &csi/&ov5640，并打开 MEDIA_SUPPORT。
+ * 摄像头模块接口（OV5640，并行 DVP 8-bit）：
+ *   - I2C 控制：I2C2，地址 0x3C
+ *   - 数据：CSI 并行总线，PIXCLK/HSYNC/VSYNC + DATA00..07
+ *   - 主时钟：CSI_MCLK = 24MHz（由 CSI 时钟树提供）
+ *   - PWDN = GPIO1_IO04（高有效），RESET = GPIO1_IO02（低有效）
+ * 若实际板子的 PWDN/RESET 引脚与此不同，改 pinctrl_csi_pwr 与
+ * ov5640 节点的 powerdown-gpios/reset-gpios 即可。
  * SDIO WiFi 使用 USDHC2，与 NAND 引脚复用，NAND 启动时不可用。
  */
+&i2c2 {
+	ov5640: camera@3c {
+		compatible = "ovti,ov5640";
+		reg = <0x3c>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&pinctrl_csi_pwr>;
+		clocks = <&clks IMX6UL_CLK_CSI>;
+		clock-names = "xclk";
+		powerdown-gpios = <&gpio1 4 GPIO_ACTIVE_HIGH>;
+		reset-gpios = <&gpio1 2 GPIO_ACTIVE_LOW>;
+		status = "okay";
+
+		port {
+			ov5640_ep: endpoint {
+				remote-endpoint = <&csi1_ep>;
+				bus-type = <MEDIA_BUS_TYPE_PARALLEL>;
+				bus-width = <8>;
+				data-shift = <2>;
+				clock-lanes = <0>;
+				data-lanes = <1 2>;
+				pclk-sample = <1>;
+				hsync-active = <0>;
+				vsync-active = <0>;
+			};
+		};
+	};
+};
+
+/* CSI 桥；clock-names 必须与 imx7-media-csi 驱动一致（只认 "mclk"） */
+&csi {
+	clocks = <&clks IMX6UL_CLK_CSI>;
+	clock-names = "mclk";
+	pinctrl-names = "default";
+	pinctrl-0 = <&pinctrl_csi1>;
+	status = "okay";
+
+	port {
+		csi1_ep: endpoint {
+			remote-endpoint = <&ov5640_ep>;
+		};
+	};
+};
+
+/*
+ * PXP 硬件加速（色彩空间转换 + 缩放 + 旋转），用于摄像头 YUV->RGB 与缩放。
+ * 必须覆盖 compatible：SoC dtsi 里是 NXP BSP 风格的 "fsl,imx6ull-pxp-dma"，
+ * 而 mainline imx-pxp 驱动只匹配 "fsl,imx6ull-pxp"。
+ * clock-names 同理：驱动只取 "axi"。
+ */
+&pxp {
+	compatible = "fsl,imx6ull-pxp";
+	clocks = <&clks IMX6UL_CLK_PXP>;
+	clock-names = "axi";
+	status = "okay";
+};
 
 /*
  * 单网口 ENET2：RTL8201F（PHY ID 0x001cc816，MDIO 地址 1）。
@@ -393,6 +456,31 @@
 	pinctrl_pwm1: pwm1grp {
 		fsl,pins = <
 			MX6UL_PAD_GPIO1_IO08__PWM1_OUT	0x110b0
+		>;
+	};
+
+	/* CSI 并行总线：PIXCLK/HSYNC/VSYNC + 8-bit 数据（D2..D9 对齐） */
+	pinctrl_csi1: csi1grp {
+		fsl,pins = <
+			MX6UL_PAD_CSI_PIXCLK__CSI_PIXCLK	0x1b088
+			MX6UL_PAD_CSI_VSYNC__CSI_VSYNC		0x1b088
+			MX6UL_PAD_CSI_HSYNC__CSI_HSYNC		0x1b088
+			MX6UL_PAD_CSI_DATA00__CSI_DATA02	0x1b088
+			MX6UL_PAD_CSI_DATA01__CSI_DATA03	0x1b088
+			MX6UL_PAD_CSI_DATA02__CSI_DATA04	0x1b088
+			MX6UL_PAD_CSI_DATA03__CSI_DATA05	0x1b088
+			MX6UL_PAD_CSI_DATA04__CSI_DATA06	0x1b088
+			MX6UL_PAD_CSI_DATA05__CSI_DATA07	0x1b088
+			MX6UL_PAD_CSI_DATA06__CSI_DATA08	0x1b088
+			MX6UL_PAD_CSI_DATA07__CSI_DATA09	0x1b088
+		>;
+	};
+
+	/* OV5640 的 PWDN(高有效) / RESET(低有效) 控制脚 */
+	pinctrl_csi_pwr: csipwrgrp {
+		fsl,pins = <
+			MX6UL_PAD_GPIO1_IO04__GPIO1_IO04	0x10b0
+			MX6UL_PAD_GPIO1_IO02__GPIO1_IO02	0x10b0
 		>;
 	};
 

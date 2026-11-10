@@ -96,7 +96,7 @@ show_help() {
     echo "  savedefconfig- 将当前 .config 回写为 ${DEFCONFIG} (别名 saveconfig)"
     echo "  build        - 仅编译 (不重新配置)"
     echo "  dtbs         - 仅编译 ${DTB}.dtb"
-    echo "  modules      - 仅编译内核模块（CONFIG_MODULES=n 时跳过）"
+    echo "  modules      - 编译内核模块；无 =m 项时仅刷新外部模块编译环境"
     echo "  deploy       - 拷贝 zImage 与 dtb 到 ${OUT_DIR}，并发布到 ${DEFAULT_TFTP_DIR}"
     echo "  info         - 显示当前编译配置信息"
     echo "  help         - 显示此帮助信息"
@@ -151,8 +151,15 @@ kernel_version() {
 }
 
 show_info() {
-    local version
+    local version mod_status
     version=$(kernel_version)
+    if [[ -f .config ]] && grep -q '^CONFIG_MODULES=y' .config; then
+        mod_status="已启用（外部 .ko 可加载）"
+    elif [[ -f .config ]]; then
+        mod_status="未启用"
+    else
+        mod_status="待配置"
+    fi
     echo -e "${YELLOW}========================================${NC}"
     echo -e "${YELLOW}  Linux for i.MX6ULL Mini (NAND)${NC}"
     if [[ -n "$version" ]]; then
@@ -162,6 +169,7 @@ show_info() {
     echo -e "${YELLOW}  CROSS_COMPILE: ${CROSS_COMPILE}${NC}"
     echo -e "${YELLOW}  DEFCONFIG:     ${DEFCONFIG}${NC}"
     echo -e "${YELLOW}  DTB:           ${DTB}.dtb${NC}"
+    echo -e "${YELLOW}  模块支持:      ${mod_status}${NC}"
     echo -e "${YELLOW}  JOBS:          ${JOBS}${NC}"
     echo -e "${YELLOW}  源码目录:      ${ROOT_DIR}${NC}"
     echo -e "${YELLOW}  产物目录:      ${OUT_DIR}${NC}"
@@ -278,10 +286,18 @@ do_modules() {
     check_config
 
     if ! grep -q '^CONFIG_MODULES=y' .config; then
-        echo -e "${YELLOW}CONFIG_MODULES=n，当前配置不生成内核模块${NC}"
+        echo -e "${YELLOW}CONFIG_MODULES=n，当前内核不支持加载模块，跳过${NC}"
         return 0
     fi
 
+    local m_count
+    m_count=$(grep -c '=m$' .config || true)
+    if (( m_count == 0 )); then
+        echo -e "${YELLOW}内核自身无 =m 项（不产出 .ko）；本步骤仅刷新外部模块编译环境${NC}"
+    fi
+
+    # 即使没有 =m，也要跑一次 modules：它会生成 Module.symvers / 更新
+    # include/generated/utsrelease.h，供外部 .ko 用 M= 方式编译。
     run_make "编译内核模块 (${JOBS} 线程)" "${MAKE_ARGS[@]}" modules
 }
 
@@ -321,10 +337,17 @@ show_build_result() {
         printf "${GREEN}  %-34s %s${NC}\n" "${file}:" "$(human_size "$size")"
     done
 
-    local ko_count
-    ko_count=$(find . -name "*.ko" -type f 2>/dev/null | wc -l)
-    if (( ko_count > 0 )); then
-        echo -e "${GREEN}  内核模块:                          ${ko_count} 个 .ko${NC}"
+    # 模块状态：CONFIG_MODULES=y 表示内核支持加载外部 .ko，
+    # 是否真的产出 .ko 取决于 .config 里 =m 的数量（本板为 0）。
+    if grep -q '^CONFIG_MODULES=y' .config 2>/dev/null; then
+        local m_count ko_count
+        m_count=$(grep -c '=m$' .config || true)
+        ko_count=$(find . -name "*.ko" -type f 2>/dev/null | wc -l)
+        if (( m_count == 0 )); then
+            echo -e "${GREEN}  模块支持:     已启用（内核无 =m 项，供外部 .ko 加载）${NC}"
+        else
+            echo -e "${GREEN}  内核模块:     =m ${m_count} 项，${ko_count} 个 .ko${NC}"
+        fi
     fi
     echo -e "${GREEN}========================================${NC}"
 }

@@ -158,7 +158,12 @@ static void unblank_screen(void);
 
 int default_utf8 = true;
 module_param(default_utf8, int, S_IRUGO | S_IWUSR);
-int global_cursor_default = -1;
+/*
+ * 本板用全屏 boot logo 作纯显示，不显示终端光标。默认 0（BSS 零初始化，
+ * 关光标），区别于上游的 -1（由 vc_allocate 置 1 显示光标）；
+ * 仍可通过 vt.global_cursor_default=1 在 bootargs 中打开。
+ */
+int global_cursor_default;
 module_param(global_cursor_default, int, S_IRUGO | S_IWUSR);
 EXPORT_SYMBOL(global_cursor_default);
 

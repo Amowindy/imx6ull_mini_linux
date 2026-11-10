@@ -408,10 +408,12 @@ CONFIG_MTD_UBI_BEB_LIMIT=20
 defconfig 从 630 行裁剪到 406 行，只保留 i.MX6ULL 与本板实际外设：
 
 - **SoC**：只保留 `SOC_IMX6UL`，关闭 `SOC_IMX6Q/SL/SLL/SX`、`SOC_IMX7D/7ULP`、`SOC_VF610`；
-- **模块**：`CONFIG_MODULES=n`，全部驱动 built-in，不再生成 `.ko`；
+- **模块**：当时定为 `CONFIG_MODULES=n`，全部驱动 built-in、不生成 `.ko`；
+  **2026-11-10 起改为 `CONFIG_MODULES=y`**，见 7.5 节；
 - **子系统**：关闭 `MEDIA_SUPPORT`（摄像头/V4L2）、`SND`（音频）、`BT`、
   `CFG80211`/`WLAN`、`DRM`、`OPTEE`/`TEE`、`MXC_GPU_VIV`/`MXC_VPU`；
-- **进一步关闭**：`PM_DEBUG`/`PM_TEST_SUSPEND`、`USER_NS`、
+- **进一步关闭**：`PM_DEBUG`/`PM_TEST_SUSPEND`（`USER_NS` 已于 2026-11-10
+  重新开启，见下）、
   `CRYPTO_TLS`/`CRYPTO_AUTHENC`、`CRYPTO_DEV_SAHARA`/`CRYPTO_DEV_FSL_CAAM_SECVIO`；
 - **调试/系统服务**：启用 `KEXEC`、`CGROUPS`/`NAMESPACES`（systemd）、
   `DYNAMIC_DEBUG`、`KPROBES`；`CRASH_DUMP`/`FTRACE` 按最新决定关闭；
@@ -429,6 +431,39 @@ defconfig 从 630 行裁剪到 406 行，只保留 i.MX6ULL 与本板实际外�
   导致 `CONFIG_CMA_SIZE_MBYTES=16` 被向上取整为 32MiB（`dmesg` 显示
   `cma: Reserved 32 MiB`）。降到 10 后 pageblock=4MiB，CMA 恢复 16MiB；
   i.MX6ULL 无 IPU/VPU/GPU，4MiB 最大连续分配已足够。
+- **虚拟地址布局（2026-11-09）**：`VMSPLIT` 从 `imx_v7_defconfig` 的
+  `2G/2G` 改回 `arch/arm/Kconfig` 默认的 `3G/1G`（`VMSPLIT_3G`），
+  `PAGE_OFFSET` 由 Kconfig 推导为 `0xC0000000`（不再是 `0x80000000`）；
+  本板物理内存只有 `0x80000000-0x8FFFFFFF` 共 256MiB，全部落在
+  lowmem，用户态虚拟地址由 2GB 恢复到 3GB。
+  > `PAGE_OFFSET` 是 Kconfig 推导符号，`savedefconfig` 不输出；若在已有
+  > `.config` 上用 `scripts/config` 切换 VMSPLIT，`olddefconfig` **不会**
+  > 重算它，必须显式 `--set-val PAGE_OFFSET 0xC0000000`，否则会出现
+  > "3G 分割 + 0x80000000" 的错误组合。切换后必须完整重编译。
+- **HIGHMEM/HIGHPTE 关闭**：板端 dmesg 一直是 `HighMem empty`、`0K highmem`，
+  256MiB 全部在 lowmem，`CONFIG_HIGHMEM=y` 只是把 kmap 代码编进来空转；
+  关掉后 `HIGHPTE`（`depends on HIGHMEM`）自动消失，`KMAP_LOCAL*` 也不再
+  被 select。属于纯体积清理，对运行行为无影响。
+- **SMP 保留，`NR_CPUS` 4→2**：i.MX6ULL 是单核 Cortex-A7，NXP 社区
+  《i.MX6ULL EVK and Linux Kernel CONFIG_SMP》也承认单核无需 SMP；但
+  `arch/arm/mach-imx/busfreq_ddr3.c` 有 10 处 `#ifdef CONFIG_SMP`，且
+  `busfreq-imx.o`/`busfreq_ddr3.o`/`busfreq_lpddr2.o` 是无条件 `obj-y`，
+  关 SMP 会走未验证的 `!SMP` 分支。为降低风险暂不关 SMP，只把
+  `NR_CPUS` 从默认 4 降到 `range` 下限 2（`arch/arm/Kconfig` 的
+  `NR_CPUS` 依赖 `SMP` 且最小为 2，写 1 会被判非法；关 SMP 后则由
+  `include/linux/threads.h` 兜底为 1），减少 per-CPU 静态数组开销。
+  `HOTPLUG_CPU`/`SMP_ON_UP`/`ARM_CPU_TOPOLOGY` 保持原样不变。
+- **清理本板无硬件的驱动**：关闭 `FB_MXC_MIPI_DSI_SAMSUNG`、
+  `FB_MXC_TRULY_WVGA_SYNC_PANEL`（并行 RGB 屏，无 MIPI-DSI）、
+  `USB_XHCI_HCD`（6ULL 只有 ChipIdea EHCI）、`USB_HCD_TEST_MODE`（EHSET
+  调试项）、`NFSD`（NFS 服务端；`NFS_FS`/`NFS_V3`/`NFS_V4` 客户端保留）。
+  `FB_MXC` 父项**必须保留**——`mxsfb` 仍包含 `mxc/mxc_dispdrv.h` 并调用
+  `mxc_dispdrv_gethandle()`；本板 DTS 无 `disp-dev` 属性，`mxsfb_dispdrv_init()`
+  会在 `!strlen(host->disp_dev)` 时直接返回，故关掉屏驱动不影响 `/dev/fb0`。
+  > **必须显式保留 `CONFIG_BACKLIGHT_CLASS_DEVICE=y`**：`drivers/video/backlight/Kconfig`
+  > 把 `BACKLIGHT_PWM` 包在 `if BACKLIGHT_CLASS_DEVICE` 块内，而该框架原本
+  > 只靠上面两个屏驱动 `select` 拉起。直接关屏驱动会让 PWM 背光被 Kconfig
+  > 一并隐藏，LCD 背光失效。显式写一行即可解耦。
 
 裁剪后实测（含 nftables/CGROUPS/Dynamic Debug）：
 
@@ -471,16 +506,134 @@ defconfig 从 630 行裁剪到 406 行，只保留 i.MX6ULL 与本板实际外�
 
 ### 7.5 模块裁剪结果
 
-最终决定：**不需要任何 .ko**，`CONFIG_MODULES=n`。
+**历史决定（2026-11-07）**：不需要任何 `.ko`，`CONFIG_MODULES=n`。
+
+> **后续变更（2026-11-10）**：改为 `CONFIG_MODULES=y` +
+> `CONFIG_MODULE_UNLOAD=y`，内核支持 `insmod`/`modprobe`，目的是能加载
+> **板外单独编译的驱动模块**（驱动开发/调试用），而不是让内核自己产出 `.ko`。
+> 板级驱动仍全部 built-in，`.config` 里 `=m` 项仍为 **0**，所以
+> `make modules` 不生成任何 `.ko`，因此不需要 `modules_install`；用绝对路径
+> `insmod` 时也不需要 `/lib/modules`（`modprobe` 按模块名查找才需要）。
+> `CONFIG_MODULE_SIG`/`MODULE_SIG_FORCE` 关闭，未签名模块可加载，便于开发；
+> `CONFIG_MODVERSIONS=y` **已开启**，模块会携带导出符号 CRC 并在加载时校验，
+> 见下方 vermagic 说明。
+>
+> 开启 `MODULES` 后 `HW_RANDOM` 的 Kconfig 默认会变成 `m`，会在无人注意时
+> 凭空产出一个 `.ko`；已在 defconfig 中显式固定 `CONFIG_HW_RANDOM=y`
+> 保持 `=m` 为 0。`HW_RANDOM_IMX_RNGC` 的 Kconfig 是 `default HW_RANDOM`，
+> 因此**不要再显式写** `CONFIG_HW_RANDOM_IMX_RNGC=y`（写也会被
+> `savedefconfig` 丢弃、造成 diff 噪声）；只要 `HW_RANDOM=y`，它自动是
+> built-in。
+>
+> **vermagic 使用约定（重要）**：`CONFIG_LOCALVERSION_AUTO=y` 且工作区常有
+> `-dirty` 后缀，vermagic 形如
+> `6.12.49-imx6ull-mini-nand-<git短号>-dirty SMP mod_unload modversions ARMv7 p2v8`。
+> 每次改动内核源码/配置并重新编译后，**外部 `.ko` 必须用同一份源码树、
+> 同一份 `.config`（以及同一份 `Module.symvers`）重新编译**，否则 `insmod`
+> 会报 `version magic ... should be ...`，或在 `MODVERSIONS` 下报
+> `disagrees about version of symbol xxx` 而拒绝加载。
+>
+> 外部模块编译方式（已实测通过）：
+>
+> ```bash
+> # 在本内核源码树根目录
+> ./build.sh modules          # 无 =m 项时用于刷新 Module.symvers / utsrelease.h
+> make ARCH=arm CROSS_COMPILE=arm-linux-gnueabihf- M=/path/to/module modules
+> # 产物 hello.ko 拷到板子（如 /mnt/nfs 挂载目录）后
+> insmod /mnt/nfs/xxx.ko
+> ```
+>
+> rootfs 侧已启用 BusyBox 的 `insmod`/`rmmod`/`lsmod`/`modprobe`/`depmod`/
+> `modinfo`；`modprobe` 按模块名查找需要 `/lib/modules/$(uname -r)/` 与
+> `modules.dep`，仅用绝对路径 `insmod` 则不需要。
+>
+> **抢占模型与 USER_NS（2026-11-10）**：`PREEMPT` 改为
+> `CONFIG_PREEMPT_VOLUNTARY=y`，`HZ` 取 Kconfig 默认 `250`
+> （响应与开销折中；纯吞吐可改 `PREEMPT_NONE` + `HZ=100`）。
+> `CONFIG_USER_NS=y` 已开启（`MEMCG`/`CGROUPS`/其他 namespace 均已在），
+> 支持容器/unprivileged 场景。
+
+### 7.8 摄像头（OV5640）与 USB 音频（2026-11-10）
+
+板载无 WM8960 codec，音频改用 **USB 声卡（UAC）** 走 OTG2 host 口；
+摄像头用 OV5640 并行 DVP 接 CSI，色彩转换/缩放交给 **PXP 硬件**。
+
+**内核配置新增**
+
+```text
+CONFIG_MEDIA_SUPPORT=y / MEDIA_SUPPORT_FILTER=y
+CONFIG_MEDIA_CAMERA_SUPPORT=y / MEDIA_PLATFORM_SUPPORT=y
+CONFIG_MEDIA_CONTROLLER=y / VIDEO_DEV=y
+CONFIG_VIDEO_IMX7_CSI=y      ← imx7-media-csi，匹配 "fsl,imx6ul-csi"
+CONFIG_VIDEO_OV5640=y
+CONFIG_VIDEO_IMX_PXP=y / V4L_MEM2MEM_DRIVERS=y   ← 硬件 CSC + 缩放
+CONFIG_SOUND=y / SND=y / SND_PCM=y / SND_USB_AUDIO=y
+```
+
+关闭：`MEDIA_ANALOG_TV/DIGITAL_TV/RADIO/SDR/TEST_SUPPORT`、`STAGING_MEDIA`。
+`=m` 仍为 0。
+
+**三个必须修的 DTS/驱动不匹配（否则 probe 失败）**
+
+| 位置 | SoC dtsi（NXP BSP 风格） | mainline 6.12 驱动要求 | 处理 |
+|---|---|---|---|
+| `pxp` compatible | `fsl,imx6ull-pxp-dma` | `fsl,imx6ull-pxp` | 板级 DTS 覆盖 |
+| `pxp` clock-names | `pxp_ipg`, `pxp_axi` | `axi`（`devm_clk_get(dev,"axi")`） | 板级 DTS 覆盖为 `axi` + `IMX6UL_CLK_PXP` |
+| `csi` clock-names | `disp-axi`, `csi_mclk`, `disp_dcic` | `mclk` | 板级 DTS 覆盖为 `mclk` + `IMX6UL_CLK_CSI` |
+| `ov5640` 属性名 | NXP: `pwn-gpios`/`rst-gpios`/`clock-names="csi_mclk"` | `powerdown-gpios`/`reset-gpios`/`clock-names="xclk"` | 按 mainline 绑定写 |
+
+**板级 DTS 新增**
+
+```text
+&i2c2 下 ov5640: camera@3c
+  compatible="ovti,ov5640"; clocks=IMX6UL_CLK_CSI; clock-names="xclk"
+  powerdown-gpios=<&gpio1 4 GPIO_ACTIVE_HIGH>
+  reset-gpios=<&gpio1 2 GPIO_ACTIVE_LOW>
+  endpoint: bus-type=MEDIA_BUS_TYPE_PARALLEL, bus-width=8, data-shift=2
+&csi   status=okay, clocks=IMX6UL_CLK_CSI, clock-names="mclk"
+&pxp   compatible="fsl,imx6ull-pxp", clocks=IMX6UL_CLK_PXP, clock-names="axi"
+iomuxc: pinctrl_csi1（PIXCLK/HSYNC/VSYNC + DATA00..07→CSI_DATA02..09）
+        pinctrl_csi_pwr（GPIO1_IO04 / GPIO1_IO02）
+```
+
+> **注意**：`powerdown-gpios`/`reset-gpios` 用的是 GPIO1_IO04 / GPIO1_IO02，
+> 需按实际板子原理图核对；若不符，只改这两行与 `pinctrl_csi_pwr` 即可。
+> 本板 LCD 是 24 位并口，与 CSI 引脚不重叠（CSI 用独立 CSI_* pad），
+> 不需要像某些板子那样把 LCD 降到 16 位。
+
+**板端验证**
+
+```bash
+dmesg | grep -iE 'csi|ov5640|pxp'
+v4l2-ctl --list-devices          # 期望出现 imx-media / /dev/video0、/dev/video1
+v4l2-ctl -d /dev/video0 --list-formats-ext
+# USB 声卡
+cat /proc/asound/cards           # 插 USB 耳机后应出现新 card
+aplay -l
+```
+
+**Qt 运行建议（无 GPU、256MiB）**
+
+```bash
+export QT_QPA_PLATFORM=linuxfb:fb=/dev/fb0
+export QT_QPA_FONTDIR=/usr/share/fonts
+```
+
+用 QtWidgets + 软件渲染；避免 QtQuick 复杂动画；相册用缩略图缓存；
+音乐走 ALSA 直连（不要 gstreamer）；必要时开 zram/swap 缓解 256MiB 压力。
 
 - 保留为 built-in：USB ACM/Serial/FTDI、USB Gadget/ConfigFS、RNG、VLAN、
   FAT16、BINFMT_MISC、CRC32C、CAN/FLEXCAN、UART3、I2C2、KEY0、
-  iptables + nftables、IPv6、NFS、USB Storage、KEXEC/CRASH_DUMP、
-  CGROUPS/NAMESPACES、FTRACE/DYNAMIC_DEBUG；
+  iptables + nftables、IPv6、NFS 客户端、USB Storage、KEXEC、
+  CGROUPS/NAMESPACES、DYNAMIC_DEBUG/KPROBES
+  （`CRASH_DUMP`/`FTRACE`/`NFSD` 按后续决定关闭）；
 - 删除：USB 4G/WWAN、USB 网卡、AF_ALG/KTLS、CAAM、MD/DM、RPMSG/SIOX、
   PS/2、测试模块、传统加密算法；
 - 裁剪前的 101 个 .ko 逐项分析见 [`模块裁剪评估.md`](模块裁剪评估.md)；
 - 实测模块数从 101 降到 0，zImage 7.0MiB，vmlinux 18MiB。
+- **`build.sh` 已同步模块支持**：`modules` 命令在 `=m` 为 0 时仍跑一次
+  `make modules` 以刷新外部模块编译环境；`info`/编译结果显示模块支持状态；
+  `all` 与 `deploy` 流程不变（内核不产出 `.ko`，无需 `modules_install`）。
 
 ### 7.6 内建配置评估
 
@@ -525,14 +678,19 @@ defconfig 从 630 行裁剪到 406 行，只保留 i.MX6ULL 与本板实际外�
   `fb_show_logo` 画完白图后 `update_region()` 长度为 0，不覆盖图案；
 - `console=ttymxc0` 保持单 console，printk 不进 LCD；
 - `inittab` 只在 `ttymxc0` 起 shell，不在 tty1 起 getty；
-- `CONFIG_CMDLINE_EXTEND=y` +
-  `CONFIG_CMDLINE="vt.global_cursor_default=0 consoleblank=0"`：
-  U-Boot bootargs 仍完整（root/mtdparts/console），内核追加这两个参数，
-  关掉下划线光标与 10 分钟自动黑屏（`blank_screen` 会清掉图片）；
+- 光标：`drivers/tty/vt/vt.c` 的 `global_cursor_default` 默认值由 -1 改为
+  0，使 `vc_deccm=0`，`fbcon_cursor()` 直接返回、闪烁 work 不启动；
+  仍可用 `vt.global_cursor_default=1` 在 bootargs 覆盖回来。
+- `consoleblank` 无需设置：`vt.c` 的 `blankinterval` 初值为 0，
+  不启动黑屏定时器（内核文档 `kernel-parameters.txt` 亦注明默认 0）。
+- 命令行：`CONFIG_CMDLINE_FROM_BOOTLOADER=y`（Kconfig 默认）+
+  完整兜底 `CONFIG_CMDLINE`，有 U-Boot bootargs 就用它，没有就用兜底。
+  不使用 `CMDLINE_EXTEND`：那会让 bootargs 为空时内核只剩光标参数、
+  缺 `root=`/`mtdparts=` 而无法启动。
 - `CONFIG_ARCH_FORCE_MAX_ORDER=10` 保证 CMA 是 16MiB，全屏 logo 能分配成功。
 
-> 注意：`vt.global_cursor_default` 使 `vc_deccm=0`，`fbcon_cursor()` 直接
-> 返回，闪烁 work 不启动。若以后想恢复光标，去掉该参数即可。
+> 注意：改动 `global_cursor_default` 是内核通用代码，属板级定制；
+> 升级内核版本时需重新应用。
 > logo 数据在 `__initconst`，`late_initcall_sync` 后 `logos_freed=true`，
 > 启动完成后内核无法再重画；**用户态程序一旦写 `/dev/fb0` 或触发 VT
 > 滚动/清屏，图案就会被覆盖且不可恢复**。

@@ -1,27 +1,58 @@
-# i.MX6ULL Mini (NAND) 板级配置（无模块版）
+# i.MX6ULL Mini (NAND) 板级配置（支持外部驱动模块）
 #
 # 基准: imx_v7_defconfig -> 只保留 i.MX6ULL 与本板实际外设
 # 硬件: DDR3L 256MiB, NAND 512MiB, ENET2 RTL8201F, 4.3 寸 RGB888 LCD,
 #       TF 卡, USB OTG/HOST, CAN1, UART3(RS232/485/GPS), I2C2(ATK),
 #       LED, 蜂鸣器, KEY0
 #
-# 关键 (2026-11-08):
-#   CONFIG_MODULES=n，全部驱动 built-in，不生成 .ko
+# 关键 (2026-11-10):
+#   CONFIG_MODULES=y：内核支持 insmod/modprobe，供外部单独编译的 .ko 加载；
+#     板级驱动仍全部 built-in，内核自身不产出 .ko（模块数仍为 0）
+#   CONFIG_MODVERSIONS=y：模块符号 CRC 校验；外部 .ko 必须用同一份源码树 +
+#     同一 .config 编译，且 vermagic 会多一个 "modversions" 字段
+#   CONFIG_LOCALVERSION_AUTO=y 且常有 -dirty 后缀：外部 .ko 必须用同一份
+#     内核源码树 + 同一 .config 编译，否则 vermagic 不匹配会被拒绝加载
+#   CONFIG_USER_NS=y：启用 user namespace（已开 MEMCG/CGROUPS/其他 NS）
+#   抢占/节拍：PREEMPT_VOLUNTARY + HZ=250（Kconfig 默认节拍，兼顾响应与开销；
+#     低延迟场景可改 PREEMPT + HZ=250，纯吞吐可改 PREEMPT_NONE + HZ=100）
 #   CONFIG_ARCH_FORCE_MAX_ORDER=10：CMA 16MiB 不再被取整到 32MiB
+#   VMSPLIT 使用 Kconfig 默认 3G/1G（不再用 imx_v7 的 2G/2G），
+#     PAGE_OFFSET 由 Kconfig 推导为 0xC0000000；256MiB 内存全在 lowmem
+#   HIGHMEM/HIGHPTE 关闭：本板 0K highmem，开着只是空转
+#   保留 SMP（NXP 官方 defconfig 亦如此，busfreq 有多处 #ifdef CONFIG_SMP），
+#     NR_CPUS 由 default 4 降为 range 下限 2，减少 per-CPU 静态数组开销
+#   CONFIG_CMDLINE_FROM_BOOTLOADER=y（Kconfig 默认）+ 完整兜底 CMDLINE
+#     - 有 U-Boot bootargs 就用它，没有就用内核兜底，两种情况都能起
+#     - 不使用 CMDLINE_EXTEND（避免 bootargs 为空时只剩光标参数而起不来）
+#   光标：drivers/tty/vt/vt.c 中 global_cursor_default 默认 0，
+#     全屏 logo 下不显示闪烁光标；可用 vt.global_cursor_default=1 覆盖
+#   consoleblank 无需设置：vt.c 的 blankinterval 初值就是 0（不自动黑屏）
 #   启动画面：CONFIG_LOGO_MINI_CLUT224=y，自定义全屏白底 840x480 logo
 #     - 源图 linux_logo.png -> drivers/video/logo/logo_mini_clut224.ppm (P3/224色)
 #     - 关闭标准企鹅 mono/vga16/clut224
 #     - 全屏 logo 使 fbcon 文字区为 0 行，LCD 只显示图片
-#   CONFIG_CMDLINE_EXTEND=y + CMDLINE="vt.global_cursor_default=0 consoleblank=0"
-#     - 关掉闪烁光标、禁用 10 分钟自动黑屏
-#     - U-Boot bootargs 仍提供 console/root/mtdparts
-#     - console=ttymxc0 保持，printk 不进 LCD
+#   console=ttymxc0 保持，printk 不进 LCD
+#   已清掉本板无硬件的驱动：FB_MXC_MIPI_DSI_SAMSUNG、
+#     FB_MXC_TRULY_WVGA_SYNC_PANEL、USB_XHCI_HCD、USB_HCD_TEST_MODE、
+#     NFSD（NFS 服务端；NFS 客户端 NFS_FS/V3/V4 保留）
+#   BACKLIGHT_CLASS_DEVICE 必须显式 =y：原来靠上面两个屏驱动 select，
+#     关掉后若不显式保留，CONFIG_BACKLIGHT_PWM 会被 Kconfig 隐藏，
+#     PWM 背光消失。FB_MXC 父项仍需保留（mxsfb 用 mxc_dispdrv）
 #   启用: KEXEC、CGROUPS/NAMESPACES、nftables、USB_GADGET、iptables、
 #         Dynamic Debug/KPROBES
-#   关闭: CRASH_DUMP/FTRACE、PM_DEBUG/PM_TEST_SUSPEND、USER_NS、
+#   关闭: CRASH_DUMP/FTRACE、PM_DEBUG/PM_TEST_SUSPEND、
 #         CRYPTO_TLS/AUTHENC、SAHARA/CAAM SECVIO、PCI
 #   保留: NETFILTER/iptables、IPv6、NFS、USB storage、JFFS2、FB_MXC、
 #         MTD_UBI_BLOCK、CPU governors、VLAN、FAT16
+#   摄像头（2026-11-10 新增）：MEDIA_SUPPORT + MEDIA_CONTROLLER + VIDEO_DEV，
+#     VIDEO_IMX7_CSI（imx7-media-csi，匹配 fsl,imx6ul-csi）、VIDEO_OV5640、
+#     VIDEO_IMX_PXP（硬件色彩转换/缩放）+ V4L_MEM2MEM_DRIVERS。
+#     仅开 CAMERA/PLATFORM 子类，关掉 TV/RADIO/SDR/TEST/STAGING_MEDIA。
+#     注意 PXP：SoC dtsi 的 compatible 是 NXP 风格 "fsl,imx6ull-pxp-dma"，
+#     mainline 驱动只认 "fsl,imx6ull-pxp"，板级 DTS 已覆盖；CSI 的
+#     clock-names 同理（驱动只认 "mclk"）。
+#   音频（2026-11-10 新增）：本板无 WM8960，改用 USB 声卡/UAC：
+#     SOUND + SND + SND_PCM + SND_USB_AUDIO（走 OTG2 host 口）。
 #
 # 与 U-Boot 的 NAND_PARTITION_LAYOUT 一致:
 #   boot(8m),env(4m),logo(8m),kernel(32m),dtb(16m),tee(4m),-(rootfs)
@@ -30,7 +61,7 @@ CONFIG_SYSVIPC=y
 CONFIG_POSIX_MQUEUE=y
 CONFIG_NO_HZ=y
 CONFIG_HIGH_RES_TIMERS=y
-CONFIG_PREEMPT=y
+CONFIG_PREEMPT_VOLUNTARY=y
 CONFIG_IKCONFIG=y
 CONFIG_IKCONFIG_PROC=y
 CONFIG_LOG_BUF_SHIFT=18
@@ -41,6 +72,7 @@ CONFIG_CGROUP_FREEZER=y
 CONFIG_CGROUP_DEVICE=y
 CONFIG_CGROUP_CPUACCT=y
 CONFIG_NAMESPACES=y
+CONFIG_USER_NS=y
 CONFIG_RELAY=y
 CONFIG_BLK_DEV_INITRD=y
 CONFIG_EXPERT=y
@@ -56,11 +88,10 @@ CONFIG_ARM_ERRATA_764369=y
 CONFIG_ARM_ERRATA_775420=y
 CONFIG_SMP=y
 CONFIG_HAVE_ARM_ARCH_TIMER=y
-CONFIG_VMSPLIT_2G=y
+CONFIG_NR_CPUS=2
 CONFIG_ARM_PSCI=y
-CONFIG_HIGHMEM=y
-CONFIG_CMDLINE="vt.global_cursor_default=0 consoleblank=0"
-CONFIG_CMDLINE_EXTEND=y
+CONFIG_HZ_250=y
+CONFIG_CMDLINE="noinitrd console=ttymxc0,115200 ubi.mtd=rootfs root=ubi0:rootfs rootfstype=ubifs mtdparts=gpmi-nand:8m(boot),4m(env),8m(logo),32m(kernel),16m(dtb),4m(tee),-(rootfs)"
 CONFIG_CPU_FREQ=y
 CONFIG_CPU_FREQ_STAT=y
 CONFIG_CPU_FREQ_DEFAULT_GOV_ONDEMAND=y
@@ -76,6 +107,9 @@ CONFIG_ARM_PSCI_CPUIDLE=y
 CONFIG_VFP=y
 CONFIG_NEON=y
 CONFIG_KPROBES=y
+CONFIG_MODULES=y
+CONFIG_MODULE_UNLOAD=y
+CONFIG_MODVERSIONS=y
 CONFIG_BINFMT_MISC=y
 # CONFIG_COMPAT_BRK is not set
 CONFIG_CMA=y
@@ -168,6 +202,7 @@ CONFIG_SERIAL_IMX_CONSOLE=y
 CONFIG_SERIAL_FSL_LPUART=y
 CONFIG_SERIAL_FSL_LPUART_CONSOLE=y
 CONFIG_SERIAL_DEV_BUS=y
+CONFIG_HW_RANDOM=y
 # CONFIG_HW_RANDOM_ARM_SMCCC_TRNG is not set
 CONFIG_I2C=y
 CONFIG_I2C_CHARDEV=y
@@ -241,13 +276,20 @@ CONFIG_RC_CORE=y
 CONFIG_RC_DEVICES=y
 CONFIG_IR_GPIO_CIR=y
 CONFIG_MEDIA_CEC_SUPPORT=y
+CONFIG_MEDIA_SUPPORT=y
+CONFIG_MEDIA_SUPPORT_FILTER=y
+CONFIG_MEDIA_CAMERA_SUPPORT=y
+CONFIG_MEDIA_PLATFORM_SUPPORT=y
+CONFIG_V4L_MEM2MEM_DRIVERS=y
+CONFIG_VIDEO_IMX7_CSI=y
+CONFIG_VIDEO_IMX_PXP=y
+CONFIG_VIDEO_OV5640=y
 CONFIG_FB=y
 CONFIG_FB_MXS=y
-CONFIG_FB_MXC_TRULY_WVGA_SYNC_PANEL=y
-CONFIG_FB_MXC_MIPI_DSI_SAMSUNG=y
 CONFIG_LCD_CLASS_DEVICE=y
 CONFIG_LCD_L4F00242T03=y
 CONFIG_LCD_PLATFORM=y
+CONFIG_BACKLIGHT_CLASS_DEVICE=y
 CONFIG_BACKLIGHT_PWM=y
 CONFIG_BACKLIGHT_GPIO=y
 CONFIG_FRAMEBUFFER_CONSOLE=y
@@ -257,12 +299,14 @@ CONFIG_LOGO=y
 # CONFIG_LOGO_LINUX_VGA16 is not set
 # CONFIG_LOGO_LINUX_CLUT224 is not set
 CONFIG_LOGO_MINI_CLUT224=y
+CONFIG_SOUND=y
+CONFIG_SND=y
+# CONFIG_SND_DRIVERS is not set
+CONFIG_SND_USB_AUDIO=y
 CONFIG_HID_MULTITOUCH=y
 CONFIG_USB=y
 CONFIG_USB_ANNOUNCE_NEW_DEVICES=y
-CONFIG_USB_XHCI_HCD=y
 CONFIG_USB_EHCI_HCD=y
-CONFIG_USB_HCD_TEST_MODE=y
 CONFIG_USB_ACM=y
 CONFIG_USB_STORAGE=y
 CONFIG_USB_CHIPIDEA=y
@@ -315,7 +359,6 @@ CONFIG_MXC_PXP_V2=y
 CONFIG_MXC_PXP_V3=y
 CONFIG_SYNC_FILE=y
 CONFIG_STAGING=y
-CONFIG_STAGING_MEDIA=y
 CONFIG_COMMON_CLK_PWM=y
 CONFIG_MAILBOX=y
 CONFIG_IMX_GPCV2_PM_DOMAINS=y
@@ -368,7 +411,6 @@ CONFIG_NFS_V4=y
 CONFIG_NFS_V4_1=y
 CONFIG_NFS_V4_2=y
 CONFIG_ROOT_NFS=y
-CONFIG_NFSD=y
 CONFIG_NLS_DEFAULT="cp437"
 CONFIG_NLS_CODEPAGE_437=y
 CONFIG_NLS_ASCII=y
