@@ -4,7 +4,8 @@
 //
 // 不再继承 NXP EVK 的 imx6ul-14x14-evk.dtsi，只描述本板实际存在的硬件：
 //   - DDR3L 256MiB
-//   - 7 寸 RGB LCD（31MHz / 840x480），PWM1 背光，GPIO5_IO09 复位
+//   - 4.3 寸 RGB888 LCD（31MHz 像素时钟，840x480 时序，约 57.8Hz），
+//     PWM1 背光（GPIO1_IO08），GPIO5_IO09(SNVS_TAMPER9) 复位
 //   - 单网口 ENET2，RTL8201F PHY（MDIO 地址 1，GPIO5_IO08 复位）
 //   - GPMI NAND 512MiB，分区与 U-Boot 的 NAND_PARTITION_LAYOUT 一致
 //   - TF 卡（USDHC1，CD = GPIO1_IO19）
@@ -46,11 +47,23 @@
 		reg = <0x80000000 0x10000000>;	/* 256MiB */
 	};
 
+	/*
+	 * 背光（PWM1，周期 5ms = 200Hz）。
+	 *
+	 * brightness-levels 的值本身就是占空比（scale = 最后一项 = 255），
+	 * default-brightness-level 是数组下标。原来的
+	 * <0 4 8 16 32 64 128 255> 只有 8 档，50% 之后直接跳到 100%，
+	 * 中间没有可调空间。这里改为两点 + num-interpolated-steps 线性插值：
+	 *   生成 (2-1)*255+1 = 256 档，max_brightness = 255
+	 *   于是 brightness(0..255) 直接等于占空比百分比 * 2.55
+	 * 默认 204 = 255*80% ≈ 80% 占空比，与 U-Boot 的 PWM 占空比保持一致。
+	 */
 	backlight: backlight {
 		compatible = "pwm-backlight";
 		pwms = <&pwm1 0 5000000 0>;
-		brightness-levels = <0 4 8 16 32 64 128 255>;
-		default-brightness-level = <6>;
+		brightness-levels = <0 255>;
+		num-interpolated-steps = <255>;
+		default-brightness-level = <204>;
 		status = "okay";
 	};
 
@@ -297,7 +310,16 @@
 	status = "okay";
 
 	display0: display@0 {
-		/* 4.3 寸 RGB888 屏；32bpp RGB888 经 24bit 总线输出 */
+		/*
+		 * 本板 4.3 寸 RGB888 屏（800x480@60Hz），屏幕手册给出的时序：
+		 *   显示区 800 tCLK / 480 th，像素时钟 31MHz
+		 *   HSPW 48、HBP 88、HFP 40 → H_total = 976 tCLK
+		 *   VSPW  3、VBP 32、VFP 13 → V_total = 528 th
+		 *   31MHz / (976 * 528) ≈ 60.1Hz
+		 * 注意：hactive 必须与屏幕有效像素一致（800）。写成 840 会与
+		 * U-Boot 及 logo 数据宽度不匹配（居中算出负偏移→花屏）。
+		 * 32bpp RGB888 经 24bit 总线输出。
+		 */
 		bits-per-pixel = <32>;
 		bus-width = <24>;
 
@@ -306,7 +328,7 @@
 
 			timing0: timing0 {
 				clock-frequency = <31000000>;
-				hactive = <840>;
+				hactive = <800>;
 				vactive = <480>;
 				hfront-porch = <40>;
 				hback-porch = <88>;

@@ -19,7 +19,7 @@
 | SoC | NXP i.MX6ULL，Cortex-A7（ARMv7） |
 | DDR3L | 256MB，起始地址 `0x80000000` |
 | NAND | GPMI NAND，512MiB，`nand-on-flash-bbt`，minimum ECC |
-| LCD | 7 寸 RGB 屏，31MHz，840x480 时序（与 U-Boot 保持一致） |
+| LCD | 4.3 寸 RGB888 屏（正点原子 ATK4384），31MHz，**800x480** 时序，60Hz（与 U-Boot 一致） |
 | 以太网 | 仅 ENET2，RMII，PHY 地址 1，实板 RTL8201F（ID `001c.c816`），DTS 写死 `ethernet-phy-id001c.c816` |
 | 调试串口 | UART1 / `ttymxc0`，115200 |
 | 存储卡 | TF 卡：USDHC1，4 位，CD = GPIO1_IO19 |
@@ -35,12 +35,19 @@
 ```text
 DRAM:  256 MiB
 NAND:  512 MiB
-[*]-Video Link 0 (840 x 480)
+[*]-Video Link 0 (800 x 480)
 Net:   eth1: ethernet@20b4000 [PRIME]
 ```
 
 > NAND 容量以实机 `NAND: 512 MiB` 为准。早期文档按 256MiB 估算的
 > rootfs 可用空间（184MiB）已作废，实际为 440MiB = `0x1B800000`。
+>
+> **DRAM 容量已确认是 256MiB**（U-Boot 启动日志 `DRAM: 256 MiB`，
+> 来自 `imx_ddr_size()` 动态读取 MMDC 配置），因此设备树
+> `memory@80000000 { reg = <0x80000000 0x10000000>; }`（256MiB）正确。
+> 正点原子 Mini 核心板有 256MB/512MB 两个版本，本板是 256MB 版。
+> 注意 `md.l 0x80000000 1` 读的是内存**内容**，不能判断容量；
+> 要看容量应使用 U-Boot 的 `bdinfo` 命令或启动日志的 `DRAM:` 行。
 
 U-Boot 加载地址与内核启动参数：
 
@@ -115,12 +122,12 @@ U-Boot 的 `imximage_256M.cfg` 将 DDR 配置为 256MB，设备树同步覆盖�
 
 ### 6.2 LCD 时序
 
-沿用 U-Boot `imx6ul-14x14-evk.dtsi` 中的 7 寸屏参数：
+正点原子 4.3 寸 ATK4384 屏参数（**hactive=800**，早期误写为 840，详见下方注意事项）：
 
 ```dts
 &timing0 {
 	clock-frequency = <31000000>;
-	hactive = <840>;
+	hactive = <800>;
 	vactive = <480>;
 	hfront-porch = <40>;
 	hback-porch = <88>;
@@ -139,7 +146,39 @@ LCD 复位脚为 `GPIO5_IO09`，已在 pinctrl 中复用为 GPIO，设备树通�
 };
 ```
 
-> 注意：U-Boot 原始提交中 `hactive = <840>`，若实际屏为标准 800x480，需要同时修改 U-Boot 与内核设备树为 `800`。
+> **注意（2026-11-10 已修正为 800）**：屏幕手册给出的权威时序为
+> **800×480@60Hz、31MHz**：
+>
+> ```text
+> 水平：显示区 800 + HSPW 48 + HBP 88 + HFP 40 = 976 tCLK
+> 垂直：显示区 480 + VSPW 3 + VBP 32 + VFP 13 = 528 th
+> 31MHz / (976 × 528) ≈ 60.1Hz
+> ```
+>
+> U-Boot 共享的 `imx6ul-14x14-evk.dtsi` 里原来写成 `hactive = <840>`
+> （把 hfront-porch 的 40 误加进了有效像素），帧率只有 57.8Hz、右侧 40 列被裁。
+> 修正方式（两侧都直接改时序定义处）：
+> - 内核：`imx6ull-14x14-evk_nand.dts` 的 `timing0 { hactive = <800>; }`；
+> - U-Boot：直接改共享的 `arch/arm/dts/imx6ul-14x14-evk.dtsi` 的
+>   `timing0 { hactive = <800>; }`（本仓库只构建本板 dtb，故直接改共享
+>   dtsi；`imx6ul-14x14-evk` / `imx6ulz-14x14-evk` 会一并变成 800×480）。
+> - logo 资源同步从 840×480 裁成 800×480（`fb_show_logo_line()` 里
+>   `image.width = logo->width` 不按 `xres` 裁剪，840 宽会越界写坏画面）。
+>
+> **刷机必读（踩过的坑）**：U-Boot 的 logo 来自 **NAND 的 `logo` 分区**
+> （`splashsource=nand` + `splashimage=0x8c000000` + `splashpos=m,m`），
+> 不是编进 `u-boot-dtb.imx` 的。只执行 `tftp_update uboot` 而不执行
+> `tftp_update logo`，NAND 里仍是旧的 840×480 图，与 800 宽面板不匹配：
+>
+> ```text
+> video_splash_align_axis():  x = (panel - bmp) / 2 = (800-840)/2 = -20
+> video_bmp_display():        start = fb + y*line_length + x*bpix/8
+>                             = fb - 60   ← 负偏移，写到上一行末尾
+> ```
+>
+> 结果就是整屏花屏。**改分辨率时 `uboot` 与 `logo` 必须一起刷**。
+> 快速验证是否为此原因：U-Boot 里 `setenv splashpos=0,0; saveenv; reset`，
+> 若图片能显示（只是右侧被裁）即证实。
 
 ### 6.3 网络
 
@@ -319,7 +358,7 @@ DTS 直接 `#include "imx6ull.dtsi"`，编译后约 31KiB（精简前 37KiB）�
 | `&uart1` | 调试串口 `ttymxc0` |
 | `&fec2` | RMII，PHY@1 `ethernet-phy-id001c.c816`（RTL8201F），`GPIO5_IO08` 复位 200ms |
 | `&gpmi` | `nand-on-flash-bbt`、`fsl,use-minimum-ecc`、7 个分区 |
-| `&lcdif` | 840x480/31MHz、24bit RGB888、`bits-per-pixel=32`、PWM1 背光、`GPIO5_IO09` 复位 |
+| `&lcdif` | 800x480/31MHz(60Hz)、24bit RGB888、`bits-per-pixel=32`、PWM1 背光(80%)、`GPIO5_IO09` 复位 |
 | `&pwm1` | 背光 PWM |
 | `&usdhc1` | TF 卡，4bit，CD=`GPIO1_IO19`，`no-1-8-v` |
 | `&usbotg1` / `&usbotg2` | USB OTG（MiniUSB）/ USB HOST |
@@ -622,6 +661,67 @@ export QT_QPA_FONTDIR=/usr/share/fonts
 用 QtWidgets + 软件渲染；避免 QtQuick 复杂动画；相册用缩略图缓存；
 音乐走 ALSA 直连（不要 gstreamer）；必要时开 zram/swap 缓解 256MiB 压力。
 
+#### 背光亮度与 U-Boot 统一（2026-11-10）
+
+现象：U-Boot logo 明显比 Linux logo 亮。原因是同一根 `GPIO1_IO08`、两边控制方式不同：
+
+```text
+U-Boot（改前）board/freescale/mx6ullevk/mx6ullevk.c : setup_lcd()
+        gpio_direction_output(IMX_GPIO_NR(1, 8), 1)   → 恒定高电平 = 100%
+Linux（改前）backlight: brightness-levels = <0 4 8 16 32 64 128 255>
+        default-brightness-level = <6>                → levels[6]=128 → 50%
+```
+
+**两侧统一到 PWM 80%，并重做 Linux 的亮度表。**
+
+1. **Linux 亮度档位**：原表只有 8 档（`0 4 8 16 32 64 128 255`），
+   50% 之后直接跳 100%，中间没有可调空间。改为两点 + 内核插值：
+
+```dts
+brightness-levels = <0 255>;
+num-interpolated-steps = <255>;      /* (2-1)*255+1 = 256 档，max_brightness=255 */
+default-brightness-level = <204>;    /* 255*80% ≈ 80% */
+```
+
+   于是 `brightness` 0..255 直接对应占空比 0..100%（每档 0.39%），
+   运行时 `echo 190 > /sys/class/backlight/backlight/brightness` 即 74.5%。
+
+2. **U-Boot 改用 PWM**（不再用 GPIO 拉高）：
+
+```text
+include/configs/mx6ullevk.h : + #define CFG_IMX6_PWM_PER_CLK 66000000
+configs/mx6ull_14x14_evk_nand_defconfig : + CONFIG_PWM_IMX=y（不加 CONFIG_DM_PWM）
+board/freescale/mx6ullevk/mx6ullevk.c :
+    lcd_pads 改为 MX6_PAD_GPIO1_IO08__PWM1_OUT
+    LCD_BACKLIGHT_PERIOD_NS = 5000000（200Hz）
+    LCD_BACKLIGHT_DUTY_NS   = period*204/255（=4000000ns，80%）
+    手动 setbits CCGR4 的 MXC_CCM_CCGR4_PWM1_MASK 打开 PWM1 时钟门控，
+    再调用 legacy 的 pwm_init/pwm_config/pwm_enable（参数顺序是
+    (id, duty_ns, period_ns)，duty 在前，容易写反）；
+    失败时回退到 GPIO 常亮，保证屏幕仍可见。
+```
+
+> **必须用 legacy PWM，不能用 DM PWM**：U-Boot 的 i.MX6ULL 没有
+> `clk-imx6ul.c`、`CONFIG_CLK` 也未开启，DM 版 `drivers/pwm/pwm-imx.c`
+> 在 `imx_pwm_of_to_plat()` 里调用 `clk_get_by_name(dev, "per")` 会返回
+> `-ENOSYS`，probe 失败，串口打印
+> `Failed to get per_clk` + `LCD backlight: no PWM device (-38)`。
+> 关掉 `CONFIG_DM_PWM` 后 `pwm-imx.c` 走 `#ifndef CONFIG_DM_PWM` 的
+> legacy 分支，按 `PWM1_BASE_ADDR` 直接操作寄存器，并用
+> `CFG_IMX6_PWM_PER_CLK` 计算分频，完全不依赖 clk 框架。
+> 注意 `CONFIG_BACKLIGHT_PWM` 依赖 `DM_PWM`，关掉后会一起消失（无影响，
+> U-Boot 的 `backlight` 节点本板 DTS 里也没有）。
+>
+> U-Boot 侧 `lcd_pads` 必须同步改成 PWM 复用功能，否则 PWM 驱动配好了但引脚
+> 还是 GPIO，输出不会到背光；回退路径会重新把引脚切回 GPIO 模式。
+> Linux 侧 `pwm-imx27` 在 100% 占空比时 `SAR(=period) > PWMPR(=period-2)`，
+> 硬件输出恒高，同样安全。
+> 两侧现在都是 80%（`204/255`，U-Boot 侧 `5000000*204/255 = 4000000ns`），
+> 切换时不再有亮度跳变。运行时调亮/调暗只写 Linux 侧
+> `/sys/class/backlight/backlight/brightness`（0..255）；下次上电仍回到 80%。
+> 若要让 U-Boot 和 Linux 一起改默认值，需同时改
+> `default-brightness-level` 与 U-Boot 的 `LCD_BACKLIGHT_DUTY_NS`。
+
 - 保留为 built-in：USB ACM/Serial/FTDI、USB Gadget/ConfigFS、RNG、VLAN、
   FAT16、BINFMT_MISC、CRC32C、CAN/FLEXCAN、UART3、I2C2、KEY0、
   iptables + nftables、IPv6、NFS 客户端、USB Storage、KEXEC、
@@ -653,7 +753,7 @@ export QT_QPA_FONTDIR=/usr/share/fonts
 
 | 文件 | 改动 |
 |---|---|
-| `drivers/video/logo/logo_mini_clut224.ppm` | 新增，P3 ASCII PPM，840x480，224 色，白底 |
+| `drivers/video/logo/logo_mini_clut224.ppm` | 新增，P3 ASCII PPM，**800x480**，224 色，白底 |
 | `drivers/video/logo/Kconfig` | 新增 `CONFIG_LOGO_MINI_CLUT224` |
 | `drivers/video/logo/Makefile` | 新增 `logo_mini_clut224.o`（.c 由 `pnmtologo` 自动生成） |
 | `include/linux/linux_logo.h` | 新增 `extern const struct linux_logo logo_mini_clut224;` |
@@ -663,11 +763,11 @@ export QT_QPA_FONTDIR=/usr/share/fonts
 图片生成（源图 `linux_logo.png`，2656x1600 RGBA 白底）：
 
 ```text
-等比缩放 797x480 → 居中贴到 840x480 纯白画布（不变形、左右各 21px 白边）
+等比缩放 797x480 → 居中贴到 800x480 纯白画布（不变形、左右各 1~2px 白边）
 → MEDIANCUT 量化 224 色、无抖动（白底不产生噪点）
 → 强制调色板最接近白的项为纯 (255,255,255)
 → 输出 P3 PPM（pnmtologo 不接受 PNG/P6 二进制 PNM）
-→ 840*480 = 403200 字节数据 + 224*3 字节 clut，编进 __initconst
+→ 800*480 = 384000 字节数据 + 224*3 字节 clut，编进 __initconst
 ```
 
 **"只显示图片、不要 VT 终端"的实现**：内核 logo 由
@@ -893,7 +993,7 @@ rootfs 镜像命名与 U-Boot 的 `rootfs_file` 保持一致：`rootfs_nand.ubi`
    （256MiB 板约 218MiB），卷使用 `autoresize=1` 在首次挂载时扩展到整个
    分区；U-Boot 侧 `tftp_update rootfs` 采用 `nand write.trimffs` 写入，
    并在擦除前校验镜像大小与 RAM 窗口。
-4. **LCD 时序**：`hactive = 840` 来自 U-Boot 提交，若屏幕为 800x480 需两端同步修改。
+4. **LCD 时序**：`hactive` 已按屏幕手册修正为 800（原 U-Boot 提交里是 840），两端已同步。
 5. **网络 PHY**：实板经 `mii read 1 2/3` 实测为 `0x001CC816`
    （Realtek RTL8201F），与正点原子资料标注的 LAN8720A 不符。最小 DTS 直接写
    `compatible = "ethernet-phy-id001c.c816"`，defconfig 保留
