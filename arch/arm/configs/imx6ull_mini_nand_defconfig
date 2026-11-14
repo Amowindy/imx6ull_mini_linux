@@ -15,10 +15,14 @@
 #   CONFIG_USER_NS=y：启用 user namespace（已开 MEMCG/CGROUPS/其他 NS）
 #   抢占/节拍：PREEMPT_VOLUNTARY + HZ=250（Kconfig 默认节拍，兼顾响应与开销；
 #     低延迟场景可改 PREEMPT + HZ=250，纯吞吐可改 PREEMPT_NONE + HZ=100）
-#   CMA：大小由设备树 reserved-memory/linux,cma 决定（本板 16MiB），
-#     defconfig 只开 CONFIG_CMA=y + CONFIG_DMA_CMA=y，不显式设
-#     CONFIG_CMA_SIZE_MBYTES（DTS 有该节点时 Kconfig 的值会被忽略）
-#   CONFIG_ARCH_FORCE_MAX_ORDER=10：让 16MiB CMA 不被取整到 32MiB
+#   CMA：大小由设备树 reserved-memory/linux,cma 决定（本板 32MiB，
+#     为 PXP 转换/录像缓冲留余量），defconfig 只开 CONFIG_CMA=y +
+#     CONFIG_DMA_CMA=y，不显式设 CONFIG_CMA_SIZE_MBYTES
+#     （DTS 有该节点时 Kconfig 的值会被忽略）
+#   CONFIG_ARCH_FORCE_MAX_ORDER=10：pageblock=4MiB，保证 CMA 按 DTS 尺寸
+#     精确分配（16/32MiB 均为 4MiB 整数倍），不会被向上取整
+#   CPU 调频固定 performance：多媒体负载（V4L2 预览软转换、Qt、音频）
+#     需要稳定 792MHz，避免 ondemand 在 198~792MHz 间抖动造成掉帧
 #   VMSPLIT 使用 Kconfig 默认 3G/1G（不再用 imx_v7 的 2G/2G），
 #     PAGE_OFFSET 由 Kconfig 推导为 0xC0000000；256MiB 内存全在 lowmem
 #   HIGHMEM/HIGHPTE 关闭：本板 0K highmem，开着只是空转
@@ -97,7 +101,7 @@ CONFIG_HZ_250=y
 CONFIG_CMDLINE="noinitrd console=ttymxc0,115200 ubi.mtd=rootfs root=ubi0:rootfs rootfstype=ubifs mtdparts=gpmi-nand:8m(boot),4m(env),8m(logo),32m(kernel),16m(dtb),4m(tee),-(rootfs)"
 CONFIG_CPU_FREQ=y
 CONFIG_CPU_FREQ_STAT=y
-CONFIG_CPU_FREQ_DEFAULT_GOV_ONDEMAND=y
+CONFIG_CPU_FREQ_DEFAULT_GOV_PERFORMANCE=y
 CONFIG_CPU_FREQ_GOV_POWERSAVE=y
 CONFIG_CPU_FREQ_GOV_USERSPACE=y
 CONFIG_CPU_FREQ_GOV_CONSERVATIVE=y

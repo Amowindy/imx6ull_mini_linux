@@ -26,7 +26,7 @@
 //   - PXP 硬件色彩转换/缩放
 //   - ON_OFF 按键（核心板 B4，snvs_pwrkey，短按唤醒/长按下电）
 //   - SNVS RTC + CR1220 后备电池（核心板 BAT54C 双电源切换，断电保时）
-//   - CMA 16MiB（本文件 reserved-memory/linux,cma 声明，见下方注释）
+//   - CMA 32MiB（本文件 reserved-memory/linux,cma 声明，见下方注释）
 //
 // 明确不包含（本板没有或暂未启用）：
 //   WM8960 音频（板载无 codec，音频走 USB 声卡，接 USB HOST 口）、
@@ -89,7 +89,7 @@
 		linux,cma {
 			compatible = "shared-dma-pool";
 			reusable;
-			size = <0x1000000>;	/* 16MiB */
+			size = <0x2000000>;	/* 32MiB：PXP/录像缓冲余量 */
 			linux,cma-default;
 		};
 	};

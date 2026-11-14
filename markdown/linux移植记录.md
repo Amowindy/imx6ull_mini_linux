@@ -582,14 +582,15 @@ defconfig 从 630 行裁剪到 406 行，只保留 i.MX6ULL 与本板实际外�
   `IPV6`、`NFS`、`USB_STORAGE`；
 - **新增**：`INPUT_GPIO_BEEPER=y`（蜂鸣器），`LEDS_TRIGGER_HEARTBEAT` 已有。
 - **CMA（2026-11-11 起以设备树为准）**：大小改由板级 DTS 的
-  `reserved-memory/linux,cma` 显式声明（16MiB），defconfig 只保留
+  `reserved-memory/linux,cma` 显式声明（**32MiB**，2026-11-15 由 16MiB
+  提升：为 PXP 硬件转换/MJPEG 录像缓冲留余量），defconfig 只保留
   `CONFIG_CMA=y` + `CONFIG_DMA_CMA=y`，**不显式设**
   `CONFIG_CMA_SIZE_MBYTES`——DTS 有该节点时 Kconfig 的值会被忽略，
   避免"两处配置、不知道谁生效"。
 - **`CONFIG_ARCH_FORCE_MAX_ORDER=10`**（imx_v7 原为 13）：13 会令
   `pageblock_nr_pages = 2^13 = 32MiB`，进而 `CMA_MIN_ALIGNMENT_BYTES=32MiB`，
   CMA 会被向上取整到 32MiB（`dmesg` 显示 `cma: Reserved 32 MiB`）。
-  降到 10 后 pageblock=4MiB，16MiB 的 CMA 才能原样保留；
+  降到 10 后 pageblock=4MiB，16/32MiB 均可按 DTS 尺寸精确保留；
   i.MX6ULL 无 IPU/VPU/GPU，4MiB 最大连续分配已足够。
 - **虚拟地址布局（2026-11-09）**：`VMSPLIT` 从 `imx_v7_defconfig` 的
   `2G/2G` 改回 `arch/arm/Kconfig` 默认的 `3G/1G`（`VMSPLIT_3G`），
@@ -1072,10 +1073,16 @@ reboot
   完整兜底 `CONFIG_CMDLINE`，有 U-Boot bootargs 就用它，没有就用兜底。
   不使用 `CMDLINE_EXTEND`：那会让 bootargs 为空时内核只剩光标参数、
   缺 `root=`/`mtdparts=` 而无法启动。
-- `CONFIG_ARCH_FORCE_MAX_ORDER=10` + DTS 的 `linux,cma { size = <0x1000000>; }`
-  共同保证 CMA 是 16MiB，全屏 logo 能分配成功。
-- CMA 实测不是帧率瓶颈：摄像头预览时 `CmaFree` 长期有 13MiB+ 剩余，
-  瓶颈是 CPU memcpy（见 7.8 节）。
+- `CONFIG_ARCH_FORCE_MAX_ORDER=10` + DTS 的 `linux,cma { size = <0x2000000>; }`
+  共同保证 CMA 是 32MiB，全屏 logo 能分配成功。
+- CMA 实测不是帧率瓶颈：16MiB 时摄像头预览 `CmaFree` 约 10MiB 剩余；
+  提升到 32MiB 后余量翻倍，瓶颈仍是 CPU memcpy（见 7.8 节）。
+- **CPU 调频默认 governor（2026-11-15）**：
+  `CONFIG_CPU_FREQ_DEFAULT_GOV_PERFORMANCE=y`（原 ondemand）。
+  单核 Cortex-A7 跑 V4L2 15fps 预览 + UYVY→RGB 软转换 + Qt + ALSA，
+  ondemand 在 198/396/528/792MHz 间升降频会带来预览掉帧与触摸响应抖动；
+  无电池设备功耗代价可忽略，故固定 792MHz。其他 governor 仍编译保留，
+  运行时可 `echo ondemand > .../scaling_governor` 临时切回。
 
 > 注意：改动 `global_cursor_default` 是内核通用代码，属板级定制；
 > 升级内核版本时需重新应用。
